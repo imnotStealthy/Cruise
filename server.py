@@ -1,0 +1,462 @@
+"""Local server for Cruise (stdlib http.server, no FastAPI/uvicorn).
+
+Serves the frontend (web/) and exposes a small API + real-time SSE stream on
+127.0.0.1 only. Run: py server.py (opens the browser).
+
+stdlib choice: the app only serves a local single-user UI. http.server +
+ThreadingHTTPServer is enough and avoids bundling pydantic/starlette/uvicorn
+(~15 MB) into the executable.
+"""
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import queue
+import subprocess
+import sys
+import threading
+import time
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import urlparse
+
+# Frozen --noconsole: stdout/stderr are None -> avoid logging crashes.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
+import bot as core
+import inputs
+import telemetry
+import discord_presence
+
+HOST, PORT = "127.0.0.1", 8733
+_BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
+_MEI = Path(getattr(sys, "_MEIPASS", _BASE))
+WEB_DIR = (_MEI / "web") if (_MEI / "web").exists() else (_BASE / "web")
+ALLOWED_ORIGINS = {f"http://{HOST}:{PORT}", f"http://localhost:{PORT}"}
+ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}"}
+
+_CONTENT_TYPES = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "text/javascript; charset=utf-8",
+    ".ico": "image/x-icon",
+    ".png": "image/png",
+    ".svg": "image/svg+xml",
+    ".json": "application/json",
+}
+
+
+class BadRequest(Exception):
+    def __init__(self, message: str, status: int = 400) -> None:
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+_MUTEX_NAME = "Global\\Cruise_FH6_SingleInstance"
+_mutex_handle = None
+
+
+def already_running() -> bool:
+    """Single instance: a named Windows mutex held for the process lifetime.
+    Returns True if another Cruise instance already owns it."""
+    global _mutex_handle
+    kernel32 = ctypes.windll.kernel32
+    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+    return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+
+
+def _bad_request(msg: str) -> None:
+    raise BadRequest(msg)
+
+
+def _key(value, field: str, *, allow_empty: bool = False) -> str | None:
+    if value is None and allow_empty:
+        return None
+    if not isinstance(value, str):
+        _bad_request(f"{field} must be a string")
+    key = value.strip().lower()
+    if not key and allow_empty:
+        return None
+    if not key:
+        _bad_request(f"{field} cannot be empty")
+    if len(key) > 32 or any(ord(ch) < 33 or ord(ch) > 126 for ch in key):
+        _bad_request(f"{field} contains invalid characters")
+    return key
+
+
+def _float_range(value, field: str, minimum: float, maximum: float) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        _bad_request(f"{field} must be a number")
+    if not minimum <= number <= maximum:
+        _bad_request(f"{field} must be between {minimum} and {maximum}")
+    return number
+
+
+def _int_range(value, field: str, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        _bad_request(f"{field} must be an integer")
+    if not minimum <= number <= maximum:
+        _bad_request(f"{field} must be between {minimum} and {maximum}")
+    return number
+
+
+def _apply_config_update(cfg: dict, data: dict) -> dict:
+    if "input_backend" in data:
+        if data["input_backend"] not in ("keyboard", "gamepad"):
+            _bad_request("input_backend must be keyboard or gamepad")
+        cfg["input_backend"] = data["input_backend"]
+    if "accelerate_key" in data:
+        cfg["accelerate_key"] = _key(data["accelerate_key"], "accelerate_key")
+    if "steer_key" in data:
+        cfg["steer_key"] = _key(data["steer_key"], "steer_key", allow_empty=True)
+    if "start_delay_s" in data:
+        cfg["start_delay_s"] = _float_range(data["start_delay_s"], "start_delay_s", 0.0, 60.0)
+    if "loop_poll_s" in data:
+        cfg["loop_poll_s"] = _float_range(data["loop_poll_s"], "loop_poll_s", 0.1, 60.0)
+    if "throttle_modulation" in data:
+        cfg["throttle_modulation"] = bool(data["throttle_modulation"])
+    if "launch_ease" in data:
+        cfg["launch_ease"] = bool(data["launch_ease"])
+    if "telemetry_enabled" in data:
+        cfg["telemetry_enabled"] = bool(data["telemetry_enabled"])
+    if "telemetry_host" in data:
+        host = data["telemetry_host"]
+        if host not in ("localhost", "127.0.0.1"):
+            _bad_request("telemetry_host must be localhost or 127.0.0.1")
+        cfg["telemetry_host"] = host
+    if "telemetry_port" in data:
+        cfg["telemetry_port"] = _int_range(data["telemetry_port"], "telemetry_port", 1, 65535)
+    if "rich_presence_enabled" in data:
+        cfg["rich_presence_enabled"] = bool(data["rich_presence_enabled"])
+    return cfg
+
+
+def _refresh_telemetry(cfg: dict) -> None:
+    """Start/refresh/stop the shared telemetry listener to match the config."""
+    if cfg.get("telemetry_enabled", True):
+        telemetry.shared(cfg.get("telemetry_port", 5300), cfg.get("telemetry_host", "127.0.0.1"))
+    else:
+        telemetry.stop_shared()
+
+
+class Bot:
+    """Drives core.run in a thread, publishes log/status to SSE subscribers."""
+
+    def __init__(self) -> None:
+        self.stop_event: threading.Event | None = None
+        self.pause_event = threading.Event()
+        self.thread: threading.Thread | None = None
+        self.subs: list[queue.Queue] = []
+        self.state = "stopped"
+        self.laps = 0
+        self.started_at: float | None = None
+
+    def _publish(self, ev: dict) -> None:
+        for q in list(self.subs):
+            q.put(ev)
+
+    def on_log(self, msg: str) -> None:
+        self._publish({"type": "log", "msg": msg})
+
+    def on_status(self, state: str, laps: int) -> None:
+        self.state, self.laps = state, laps
+        if state == "stopped":
+            self.started_at = None
+        elapsed = int(time.time() - self.started_at) if self.started_at else 0
+        self._publish({"type": "status", "state": state, "laps": laps, "elapsed_s": elapsed})
+
+    @property
+    def running(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def start(self, max_laps: int) -> bool:
+        if self.running:
+            return False
+        cfg = core.load_config()
+        self.started_at = time.time()
+        self.stop_event = threading.Event()
+        self.pause_event.clear()
+
+        def work() -> None:
+            try:
+                core.run(
+                    cfg, max_cycles=max_laps, stop=self.stop_event, pause=self.pause_event,
+                    on_log=self.on_log, on_status=self.on_status,
+                )
+            except Exception as e:  # surface the error to the frontend
+                self.on_log(f"ERROR: {e}")
+                self.on_status("stopped", self.laps)
+            self._publish({"type": "done"})
+
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self) -> None:
+        if self.stop_event:
+            self.stop_event.set()
+        self.pause_event.clear()
+
+    def pause(self) -> None:
+        self.pause_event.set()
+
+    def resume(self) -> None:
+        self.pause_event.clear()
+
+    def subscribe(self) -> queue.Queue:
+        q: queue.Queue = queue.Queue()
+        self.subs.append(q)
+        return q
+
+    def unsubscribe(self, q: queue.Queue) -> None:
+        if q in self.subs:
+            self.subs.remove(q)
+
+
+bot = Bot()
+
+
+def _game_running(name: str) -> bool:
+    """True if a process <name> is running (tasklist, no console window)."""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {name}", "/NH"],
+            capture_output=True, text=True, timeout=4,
+            creationflags=0x08000000,  # CREATE_NO_WINDOW
+        )
+        return name.lower() in out.stdout.lower()
+    except Exception:
+        return False
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "Cruise"
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *args) -> None:  # silence (no console)
+        pass
+
+    # --- helpers ---
+    def _check_host(self) -> None:
+        # anti DNS-rebinding: a remote site that resolves to 127.0.0.1 will
+        # still send its own Host -> rejected. Covers GET and POST.
+        host = (self.headers.get("host") or "").lower()
+        if host not in ALLOWED_HOSTS:
+            raise BadRequest("forbidden host", status=403)
+
+    def _check_local_origin(self) -> None:
+        value = self.headers.get("origin") or self.headers.get("referer")
+        if not value:
+            return
+        parsed = urlparse(value)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in ALLOWED_ORIGINS:
+            raise BadRequest("forbidden origin", status=403)
+
+    def _read_json(self) -> dict:
+        try:
+            length = int(self.headers.get("content-length", "0"))
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return {}
+        raw = self.rfile.read(length)
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            raise BadRequest("invalid json")
+        if not isinstance(data, dict):
+            raise BadRequest("json body must be an object")
+        return data
+
+    def _send_json(self, payload: dict, status: int = 200) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_file(self, path: Path) -> None:
+        if not path.is_file():
+            self._send_json({"detail": "not found"}, status=404)
+            return
+        data = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", _CONTENT_TYPES.get(path.suffix.lower(), "application/octet-stream"))
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _static(self, rel: str) -> None:
+        # anti-traversal: resolves under WEB_DIR only
+        target = (WEB_DIR / rel.lstrip("/")).resolve()
+        try:
+            target.relative_to(WEB_DIR.resolve())
+        except ValueError:
+            self._send_json({"detail": "forbidden"}, status=403)
+            return
+        self._send_file(target)
+
+    def _sse(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        q = bot.subscribe()
+        try:
+            elapsed = int(time.time() - bot.started_at) if bot.started_at else 0
+            init = {"type": "status", "state": bot.state, "laps": bot.laps, "elapsed_s": elapsed}
+            self.wfile.write(f"data: {json.dumps(init)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            beat = 0
+            while True:
+                try:
+                    ev = q.get(timeout=0.2)
+                    self.wfile.write(f"data: {json.dumps(ev)}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    beat += 1
+                    if beat % 50 == 0:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # client gone
+        finally:
+            bot.unsubscribe(q)
+
+    # --- routing ---
+    def do_GET(self) -> None:
+        path = urlparse(self.path).path
+        try:
+            self._check_host()
+            if path == "/":
+                self._send_file(WEB_DIR / "index.html")
+            elif path.startswith("/static/"):
+                self._static(path[len("/static/"):])
+            elif path == "/api/config":
+                self._send_json(core.load_config())
+            elif path == "/api/gamepad-check":
+                ok, msg = inputs.gamepad_available()
+                self._send_json({"ok": ok, "message": msg})
+            elif path == "/api/game-status":
+                cfg = core.load_config()
+                name = cfg.get("game_process", "forzahorizon6.exe")
+                self._send_json({
+                    "running": _game_running(name),
+                    "process": name,
+                    "display": core.display_status(cfg),
+                })
+            elif path == "/api/telemetry":
+                cfg = core.load_config()
+                t = telemetry.current()
+                fresh, race_on, kmh = t.snapshot() if t else (False, False, 0.0)
+                self._send_json({
+                    "enabled": cfg.get("telemetry_enabled", True),
+                    "host": cfg.get("telemetry_host", "127.0.0.1"),
+                    "port": cfg.get("telemetry_port", 5300),
+                    "available": fresh,
+                    "race_on": race_on,
+                    "speed_kmh": round(kmh, 1),
+                })
+            elif path == "/api/rich-presence":
+                cfg = core.load_config()
+                rp = discord_presence.current()
+                disp = rp.display() if rp else {"car": None, "state": None}
+                self._send_json({
+                    "enabled": cfg.get("rich_presence_enabled", True),
+                    "connected": bool(rp and rp.connected),
+                    "car": disp["car"],
+                    "state": disp["state"],
+                })
+            elif path == "/api/status":
+                self._send_json({"state": bot.state, "laps": bot.laps, "running": bot.running})
+            elif path == "/api/events":
+                self._sse()
+            else:
+                self._send_json({"detail": "not found"}, status=404)
+        except BadRequest as e:
+            self._send_json({"detail": e.message}, status=e.status)
+
+    def do_POST(self) -> None:
+        path = urlparse(self.path).path
+        try:
+            self._check_host()
+            self._check_local_origin()
+            if path == "/api/config":
+                cfg = _apply_config_update(core.load_config(), self._read_json())
+                with core.CONFIG_PATH.open("w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2, ensure_ascii=False)
+                _refresh_telemetry(cfg)
+                self._send_json({"ok": True, "config": cfg})
+            elif path == "/api/gamepad-connect":
+                self._send_json({"ok": inputs.connect_gamepad()})
+            elif path == "/api/gamepad-disconnect":
+                inputs.disconnect_gamepad()
+                self._send_json({"ok": True})
+            elif path == "/api/start":
+                data = self._read_json()
+                max_laps = _int_range(data.get("max_laps", 0), "max_laps", 0, 1000000)
+                started = bot.start(max_laps)
+                self._send_json({"started": started, "running": bot.running})
+            elif path == "/api/stop":
+                bot.stop()
+                self._send_json({"ok": True})
+            elif path == "/api/pause":
+                bot.pause()
+                self._send_json({"ok": True, "paused": True})
+            elif path == "/api/resume":
+                bot.resume()
+                self._send_json({"ok": True, "paused": False})
+            else:
+                self._send_json({"detail": "not found"}, status=404)
+        except BadRequest as e:
+            self._send_json({"detail": e.message}, status=e.status)
+
+
+def make_server() -> ThreadingHTTPServer:
+    try:
+        cfg = core.load_config()
+        _refresh_telemetry(cfg)  # live telemetry for the UI (browser + desktop)
+        discord_presence.shared(  # Discord Rich Presence (FH6 car + speed/gear)
+            cfg.get("discord_client_id", discord_presence.DEFAULT_CLIENT_ID),
+            core.CONFIG_PATH.parent,
+            core.load_config,  # read live config (enabled flag + game_process)
+        )
+    except Exception:
+        pass
+    srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    srv.daemon_threads = True
+    return srv
+
+
+def main() -> None:
+    if already_running():
+        # Another instance is up: just surface its UI, don't start a second server.
+        webbrowser.open(f"http://{HOST}:{PORT}")
+        return
+    srv = make_server()
+    threading.Timer(1.2, lambda: webbrowser.open(f"http://{HOST}:{PORT}")).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        srv.shutdown()
+
+
+if __name__ == "__main__":
+    main()

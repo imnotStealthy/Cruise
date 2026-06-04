@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="C logo">
+  <path
+    fill="#39ffda"
+    fill-rule="evenodd"
+    shape-rendering="crispEdges"
+    d="M256 192h512v128H384v384h384v128H256z"
+  />
+</svg>

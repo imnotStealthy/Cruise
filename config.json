@@ -1,0 +1,139 @@
+{
+  "input_backend": "keyboard",
+  "game_process": "forzahorizon6.exe",
+  "game_window_title": "Forza Horizon 6",
+  "pause_when_unfocused": true,
+  "menu_resume_tries": 3,
+  "accelerate_key": "w",
+  "steer_key": null,
+  "reverse_key": "s",
+  "steer_left_key": "a",
+  "steer_right_key": "d",
+  "recovery_enabled": true,
+  "recover_mode": "rewind",
+  "rewind_key": "r",
+  "rewind_wait_s": 2.0,
+  "telemetry_enabled": true,
+  "telemetry_host": "127.0.0.1",
+  "telemetry_port": 5300,
+  "rich_presence_enabled": true,
+  "rich_presence_interval_s": 4.0,
+  "discord_client_id": "1508465470658052208",
+  "stuck_speed_kmh": 5.0,
+  "stuck_after_s": 2.5,
+  "stuck_motion_tol": 90,
+  "recover_cooldown_s": 2.0,
+  "recover_reverse_s": 1.0,
+  "recover_steer_s": 0.8,
+  "throttle_modulation": false,
+  "throttle_hold_s": 2.0,
+  "throttle_lift_s": 0.4,
+  "launch_ease": false,
+  "launch_ease_s": 4.0,
+  "loop_poll_s": 1.0,
+  "start_delay_s": 0.0,
+  "states": [
+    {
+      "name": "menu",
+      "guard": true,
+      "resume_key": "esc",
+      "match_mode": "all",
+      "pixels": [
+        {
+          "x": 0.03,
+          "y": 0.5,
+          "rgb": [
+            49,
+            137,
+            125
+          ],
+          "tol": 45
+        },
+        {
+          "x": 0.97,
+          "y": 0.7,
+          "rgb": [
+            53,
+            126,
+            123
+          ],
+          "tol": 45
+        },
+        {
+          "x": 0.2,
+          "y": 0.95,
+          "rgb": [
+            50,
+            106,
+            114
+          ],
+          "tol": 45
+        }
+      ]
+    },
+    {
+      "name": "results",
+      "hold_during_wait": true,
+      "match_mode": "all",
+      "keys": [
+        {
+          "key": "x",
+          "wait": 1.2
+        },
+        {
+          "key": "enter",
+          "wait": 1.0
+        }
+      ],
+      "post_wait_s": 8.0,
+      "band": {
+        "y": 0.227,
+        "x0": 0.25,
+        "x1": 0.78,
+        "rgb": [
+          202,
+          255,
+          2
+        ],
+        "tol": 30,
+        "samples": 60,
+        "min_hits": 25
+      }
+    },
+    {
+      "name": "prerace_menu",
+      "count_lap": true,
+      "hold_during_wait": true,
+      "match_mode": "all",
+      "keys": [
+        {
+          "key": "enter",
+          "wait": 1.0
+        }
+      ],
+      "post_wait_s": 8.0,
+      "pixels": [
+        {
+          "x": 0.133,
+          "y": 0.778,
+          "rgb": [
+            245,
+            245,
+            245
+          ],
+          "tol": 35
+        },
+        {
+          "x": 0.133,
+          "y": 0.828,
+          "rgb": [
+            245,
+            245,
+            245
+          ],
+          "tol": 35
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cruise — Telemetry Deck</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/svg+xml" href="/static/cruise-logo-c.svg" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="grain"></div>
+  <div class="scanline"></div>
+
+  <header class="topbar reveal" style="--d:0">
+    <div class="brand">
+      <svg class="brand-logo" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-label="Cruise">
+        <path fill="#39ffda" fill-rule="evenodd" shape-rendering="crispEdges" d="M256 192h512v128H384v384h384v128H256z"/>
+      </svg>
+      <div class="brand-text">
+        <span class="brand-rest">CRUISE</span>
+        <span class="brand-sub">FORZA HORIZON 6 // AUTO-FARM</span>
+      </div>
+    </div>
+    <div class="hud">
+      <div class="game-pod" id="gamePod" data-on="unknown" title="Forza Horizon 6 process detection">
+        <span class="dot"></span>
+        <span class="game-text" id="gameText">FH6 …</span>
+      </div>
+      <div class="game-pod" id="dispPod" data-disp="unknown" title="Display mode — detection adapts to the FH6 window">
+        <span class="dot"></span>
+        <span class="game-text" id="dispText">DISPLAY …</span>
+      </div>
+      <div class="status-pod" id="statusPod" data-state="stopped">
+        <span class="dot"></span>
+        <span class="status-text" id="statusText">STOPPED</span>
+      </div>
+      <div class="lap-pod">
+        <span class="lap-num" id="lapNum">000</span>
+        <span class="lap-label">LAPS</span>
+      </div>
+      <div class="time-pod">
+        <span class="time-num" id="elapsedTime">00:00:00</span>
+        <span class="time-label">ELAPSED</span>
+      </div>
+    </div>
+  </header>
+
+  <nav class="mode-tabs reveal" style="--d:1" id="modeTabs">
+    <button class="mode-tab active" data-mode="skill-points">SKILL POINTS</button>
+    <button class="mode-tab" data-mode="telemetry">TELEMETRY</button>
+    <button class="mode-tab" data-mode="discord">DISCORD RICH PRESENCE</button>
+  </nav>
+
+  <nav class="tabs reveal" style="--d:2" id="tabs">
+    <button class="tab active" data-view="controller">CONTROLLER</button>
+    <button class="tab" data-view="guide">SETUP GUIDE</button>
+    <button class="tab" data-view="eventlab">EVENTLAB CODES</button>
+  </nav>
+
+  <!-- VIEW: CONTROLLER -->
+  <section id="view-controller" class="view active">
+    <main class="grid">
+      <section class="card control">
+        <div class="card-bar"></div>
+        <h2 class="card-title">CONTROL</h2>
+
+        <label class="field-label">INPUT MODE</label>
+        <div class="seg" id="modeSeg">
+          <button data-mode="keyboard" class="seg-btn active">KEYBOARD</button>
+          <button data-mode="gamepad" class="seg-btn">GAMEPAD</button>
+        </div>
+        <p class="hint" id="modeHint">DirectInput keystrokes.</p>
+
+        <div class="ctrl-grid">
+          <div class="field">
+            <label class="field-label" id="accelLabel">ACCELERATE KEY</label>
+            <input id="accelKey" class="inp" value="w" maxlength="12" />
+          </div>
+          <div class="field" id="steerField">
+            <label class="field-label">STEERING KEY <span class="opt">(optional)</span></label>
+            <input id="steerKey" class="inp" placeholder="none" maxlength="12" />
+          </div>
+          <div class="field">
+            <label class="field-label">START DELAY</label>
+            <input id="startDelay" class="inp" value="0" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label class="field-label">POLL INTERVAL</label>
+            <input id="pollInterval" class="inp" value="1.0" inputmode="decimal" />
+          </div>
+          <div class="field">
+            <label class="field-label">MAX LAPS <span class="opt">(0 = infinite)</span></label>
+            <input id="maxLaps" class="inp" value="0" inputmode="numeric" />
+          </div>
+        </div>
+
+        <!-- Advanced: corner aids (throttle modulation / launch ease-in) -->
+        <div class="adv-wrap">
+          <button type="button" class="adv-toggle" id="advToggle" aria-expanded="false">
+            <span class="adv-caret">▸</span> ADVANCED <span class="opt">(corner aids)</span>
+          </button>
+          <div class="adv-body" id="advBody" hidden>
+            <label class="check" title="Briefly lifts the throttle on a cycle so the in-game braking assist can scrub speed into corners. Leave off for hold-throttle AFK tracks.">
+              <input type="checkbox" id="throttleMod" />
+              <span>THROTTLE MODULATION <span class="opt">(ease off in corners)</span></span>
+            </label>
+            <label class="check" title="Feathers the throttle for the first few seconds of each start/restart so the car doesn't wheelspin and veer at GO. Useful when Traction Control is OFF.">
+              <input type="checkbox" id="launchEase" />
+              <span>LAUNCH EASE-IN <span class="opt">(no wheelspin at GO)</span></span>
+            </label>
+          </div>
+        </div>
+
+        <button id="saveBtn" class="btn-ghost">SAVE CONFIG</button>
+        <div class="run-row">
+          <button id="runBtn" class="btn-run">▶ START</button>
+          <button id="pauseBtn" class="btn-pause" disabled>⏸ PAUSE</button>
+        </div>
+        <p class="failsafe">FAILSAFE — slam the mouse into the top-left corner to abort.</p>
+      </section>
+
+      <section class="card telemetry">
+        <div class="card-bar magenta"></div>
+        <div class="tel-head">
+          <h2 class="card-title">TELEMETRY</h2>
+          <button id="clearLog" class="mini">CLEAR</button>
+        </div>
+        <div class="log" id="log"></div>
+      </section>
+    </main>
+  </section>
+
+  <!-- VIEW: SETUP GUIDE -->
+  <section id="view-guide" class="view">
+    <div class="card">
+      <div class="card-bar lime"></div>
+      <h2 class="card-title">SETUP GUIDE</h2>
+      <!-- SKILL POINTS guide -->
+      <div class="mode-pane active" data-mode-pane="skill-points">
+        <ol class="steps">
+          <li>
+            <h3>1 · Display</h3>
+            <p>Run FH6 in <b>Borderless / Windowed Fullscreen</b> on your primary monitor. Exclusive Fullscreen breaks screen detection.</p>
+          </li>
+          <li>
+            <h3>2 · Difficulty &amp; Settings <span class="tag">+85% CR</span></h3>
+            <table class="settings">
+              <tr><td>Drivatar Difficulty</td><td>Unbeatable</td></tr>
+              <tr><td>Braking</td><td>Anti-Lock Off</td></tr>
+              <tr><td>Steering</td><td>Auto-Steering</td></tr>
+              <tr><td>Traction Control</td><td>Off</td></tr>
+              <tr><td>Stability Control</td><td>Off</td></tr>
+              <tr><td>Shifting</td><td>Automatic</td></tr>
+              <tr><td>Driving Line</td><td>Full</td></tr>
+              <tr><td>Damage &amp; Tire Wear</td><td>Cosmetic</td></tr>
+              <tr><td>Rewind</td><td>On</td></tr>
+              <tr><td>Launch Control</td><td>On</td></tr>
+            </table>
+            <p class="note">Short skill tracks just hold throttle straight or along the line — assists OFF for max bonus (+85% CR). No corners to brake for, and a car bumping obstacles only feeds the skill chain. Set these in-game.</p>
+          </li>
+          <li>
+            <h3>3 · Car</h3>
+            <p>Use <b>only</b> the <b>1998 Subaru Impreza 22B-STi Version</b>. Steering must be Automatic (step 2).</p>
+          </li>
+          <li>
+            <h3>4 · Run</h3>
+            <p>Reach the pre-race menu, pick your input mode &amp; keys in CONTROLLER, then hit <b>START</b>. Keep FH6 in the foreground and don’t touch mouse/keyboard.</p>
+          </li>
+        </ol>
+      </div>
+    </div>
+  </section>
+
+  <!-- VIEW: EVENTLAB CODES -->
+  <section id="view-eventlab" class="view">
+    <div class="card">
+      <div class="card-bar"></div>
+      <h2 class="card-title">EVENTLAB CODES</h2>
+      <div class="codes-list mode-pane active" data-mode-pane="skill-points">
+        <div class="code-card">
+          <div class="code-meta">
+            <h3>10 SKILL POINTS — INSTANT FARM</h3>
+            <p>EAKR on YOUTUBE · 1998 Subaru Impreza 22B-STi · Auto-Steering</p>
+            <span class="badge">SKILL POINTS</span>
+          </div>
+          <div class="code-actions">
+            <span class="code-val">381 054 444</span>
+            <button class="copy-btn" data-code="381 054 444">COPY</button>
+          </div>
+        </div>
+        <div class="code-card">
+          <div class="code-meta">
+            <h3>60sec — 10x SKILL POINT CHAIN FARM</h3>
+            <p>CAPTAINKRNK · Subaru 22B (9x skill chain mastery) · 2.2 km</p>
+            <span class="badge">SKILL CHAIN</span>
+          </div>
+          <div class="code-actions">
+            <span class="code-val">753 927 080</span>
+            <button class="copy-btn" data-code="753 927 080">COPY</button>
+          </div>
+        </div>
+        <div class="code-card">
+          <div class="code-meta">
+            <h3>999999999 MAESTRIA — 59s 3.0</h3>
+            <p>CITY OF GAMES YT (DANIVICIO10) · Subaru 22B · 2.6 km</p>
+            <span class="badge">SKILL POINTS</span>
+          </div>
+          <div class="code-actions">
+            <span class="code-val">957 924 600</span>
+            <button class="copy-btn" data-code="957 924 600">COPY</button>
+          </div>
+        </div>
+        <div class="code-card">
+          <div class="code-meta">
+            <h3>FASTEST Max Skill Points</h3>
+            <p>YTOVERDRIVE · 1998 Subaru Impreza 22B-STi · 2.9 km · Fast Straights</p>
+            <span class="badge">SKILL POINTS</span>
+          </div>
+          <div class="code-actions">
+            <span class="code-val">861 224 889</span>
+            <button class="copy-btn" data-code="861 224 889">COPY</button>
+          </div>
+        </div>
+      </div>
+      <p class="hint">In FH6: Events → Search (Backspace) → type the code → Enter. (Add your own codes here as you find them.)</p>
+    </div>
+  </section>
+
+  <!-- VIEW: TELEMETRY (Forza Data Out) -->
+  <section id="view-telemetry" class="view">
+    <main class="grid">
+      <section class="card control">
+        <div class="card-bar magenta"></div>
+        <h2 class="card-title">DATA OUT</h2>
+
+        <label class="check" title="Use Forza's UDP telemetry to know real speed — the bot only rewinds when truly stopped, never mid-jump or off-road.">
+          <input type="checkbox" id="telEnabled" />
+          <span>ENABLE TELEMETRY <span class="opt">(speed-gated rewind)</span></span>
+        </label>
+
+        <div class="ctrl-grid">
+          <div class="field">
+            <label class="field-label">HOST</label>
+            <select id="telHost" class="inp">
+              <option value="127.0.0.1">127.0.0.1</option>
+              <option value="localhost">localhost</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="field-label">PORT</label>
+            <input id="telPort" class="inp" value="5300" inputmode="numeric" maxlength="5" />
+          </div>
+        </div>
+
+        <button id="telSaveBtn" class="btn-ghost">SAVE TELEMETRY</button>
+        <p class="hint">FH6 → Settings → HUD &amp; Gameplay → <b>Data Out: ON</b>, IP = the host above, Port = the port above. Apply, then watch LIVE update.</p>
+      </section>
+
+      <section class="card telemetry">
+        <div class="card-bar magenta"></div>
+        <div class="tel-head">
+          <h2 class="card-title">LIVE</h2>
+          <span class="tel-state" id="telState" data-on="off">OFFLINE</span>
+        </div>
+        <div class="tel-readout">
+          <div class="tel-row"><span>SOURCE</span><b id="telSource">—</b></div>
+          <div class="tel-row"><span>RACE</span><b id="telRace">—</b></div>
+          <div class="tel-row"><span>SPEED</span><b id="telSpeed">— km/h</b></div>
+        </div>
+        <p class="hint" id="telHint">Enable telemetry and turn on Data Out in FH6 to see live speed.</p>
+      </section>
+    </main>
+  </section>
+
+  <!-- VIEW: DISCORD RICH PRESENCE -->
+  <section id="view-discord" class="view">
+    <main class="grid">
+      <section class="card control">
+        <div class="card-bar magenta"></div>
+        <h2 class="card-title">DISCORD RICH PRESENCE</h2>
+
+        <label class="check" title="Show your live FH6 car, speed and gear on your Discord profile. Uncheck to hide it.">
+          <input type="checkbox" id="rpEnabled" />
+          <span>SHOW ON DISCORD <span class="opt">(car · speed · gear)</span></span>
+        </label>
+
+        <button id="rpSaveBtn" class="btn-ghost">SAVE</button>
+        <p class="hint">Needs <b>Discord running</b> and telemetry enabled. The elapsed timer follows the <b>FH6 game session</b> (when the game was launched), not Cruise.</p>
+      </section>
+
+      <section class="card telemetry">
+        <div class="card-bar magenta"></div>
+        <div class="tel-head">
+          <h2 class="card-title">STATUS</h2>
+          <span class="tel-state" id="rpState" data-on="off">OFFLINE</span>
+        </div>
+        <div class="tel-readout">
+          <div class="tel-row"><span>DISCORD</span><b id="telDiscord">—</b></div>
+          <div class="tel-row"><span>CAR</span><b id="rpCar">—</b></div>
+          <div class="tel-row"><span>STATUS LINE</span><b id="rpStateLine">—</b></div>
+        </div>
+        <p class="hint" id="rpHint">Enable and start a race — your Discord shows the car, speed and gear.</p>
+      </section>
+    </main>
+  </section>
+
+  <span id="conn" class="conn off" hidden></span>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
