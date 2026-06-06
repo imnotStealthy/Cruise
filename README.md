@@ -8,6 +8,13 @@ keyboard or emulated Xbox controller — with a native UI. It can read Forza's *
 telemetry** for speed-aware stuck recovery (rewinds onto the track only when truly stopped)
 and drive a **Discord Rich Presence** showing your live car, speed and gear.
 
+## Warning
+
+Cruise is an automation tool. The practical ban risk is expected to be very low for
+private EventLab farming, but automation may still violate Turn 10 Studios' rules,
+including the [Forza Code of Conduct](https://support.forza.net/hc/en-us/articles/360035563914-Forza-Code-of-Conduct).
+Use it at your own risk.
+
 ## Run
 
 Standalone single-file build (no Python needed): **`dist\Cruise.exe`** (~18 MB) —
