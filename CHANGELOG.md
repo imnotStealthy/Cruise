@@ -3,6 +3,28 @@
 All notable changes to Cruise are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-06-06
+
+### Added
+- **Automation presets** — `SLOWED` keeps deliberate menu timing; `FAST` uses short
+  polling, fast Start Race Event selection, result-screen `X` spam, and restart
+  confirmation `Enter` spam.
+- **Manual shift assist** — with telemetry enabled, Cruise taps the configured
+  upshift key near the rev limiter for manual gearbox setups.
+- **EventLab code** — added `362 177 064` for `15 Seconds = 10 Skill Points`.
+
+### Fixed
+- Start Race Event selection now detects the highlighted pre-race row and
+  normalizes from Difficulty & Settings, Starting Grid, or Quit Race before
+  pressing Enter.
+- Restart confirmation now forces `Yes`; if `No` is highlighted it moves up before
+  confirming.
+- Start/Stop UI requests are guarded to avoid accidental double-submit.
+
+### Changed
+- Runtime `config.json` and `cars.json` now live in `%USERPROFILE%\.cruise`;
+  builds no longer copy config beside `dist\Cruise.exe`.
+
 ## [1.2.0] - 2026-06-04
 
 ### Added

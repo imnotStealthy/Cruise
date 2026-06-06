@@ -30,6 +30,14 @@
   "throttle_lift_s": 0.4,
   "launch_ease": false,
   "launch_ease_s": 4.0,
+  "automation_preset": "slowed",
+  "manual_shift_assist": true,
+  "shift_up_key": "e",
+  "gamepad_shift_up_key": "b",
+  "shift_up_rpm_ratio": 0.9,
+  "shift_detect_s": 0.25,
+  "shift_cooldown_s": 0.9,
+  "shift_min_speed_kmh": 8.0,
   "loop_poll_s": 1.0,
   "start_delay_s": 0.0,
   "states": [
@@ -73,19 +81,14 @@
     },
     {
       "name": "results",
-      "hold_during_wait": true,
       "match_mode": "all",
       "keys": [
         {
           "key": "x",
           "wait": 1.2
-        },
-        {
-          "key": "enter",
-          "wait": 1.0
         }
       ],
-      "post_wait_s": 8.0,
+      "post_wait_s": 1.0,
       "band": {
         "y": 0.227,
         "x0": 0.25,
@@ -101,10 +104,122 @@
       }
     },
     {
+      "name": "restart_confirm",
+      "hold_during_wait": true,
+      "match_mode": "all",
+      "selected_menu": {
+        "x": 0.35,
+        "dark_max": 120,
+        "required": true,
+        "rows": [
+          {
+            "name": "yes",
+            "y": 0.56,
+            "keys": []
+          },
+          {
+            "name": "no",
+            "y": 0.616,
+            "keys": [
+              {
+                "key": "up",
+                "wait": 0.5
+              }
+            ]
+          }
+        ]
+      },
+      "keys": [
+        {
+          "key": "enter",
+          "wait": 1.0
+        }
+      ],
+      "post_wait_s": 8.0,
+      "band": {
+        "y": 0.39,
+        "x0": 0.28,
+        "x1": 0.72,
+        "rgb": [
+          202,
+          255,
+          2
+        ],
+        "tol": 45,
+        "samples": 80,
+        "min_hits": 45
+      }
+    },
+    {
+      "name": "settings_menu",
+      "guard": true,
+      "resume_key": "esc",
+      "match_mode": "all",
+      "band": {
+        "y": 0.23,
+        "x0": 0.78,
+        "x1": 0.96,
+        "rgb": [
+          202,
+          255,
+          2
+        ],
+        "tol": 30,
+        "samples": 40,
+        "min_hits": 15
+      }
+    },
+    {
       "name": "prerace_menu",
       "count_lap": true,
       "hold_during_wait": true,
-      "match_mode": "all",
+      "match_mode": "any",
+      "selected_menu": {
+        "x": 0.18,
+        "dark_max": 120,
+        "required": true,
+        "rows": [
+          {
+            "name": "start_race_event",
+            "y": 0.621,
+            "keys": []
+          },
+          {
+            "name": "difficulty_settings",
+            "y": 0.675,
+            "keys": [
+              {
+                "key": "up",
+                "wait": 0.4
+              }
+            ]
+          },
+          {
+            "name": "starting_grid",
+            "y": 0.778,
+            "keys": [
+              {
+                "key": "down",
+                "wait": 0.4
+              },
+              {
+                "key": "down",
+                "wait": 0.4
+              }
+            ]
+          },
+          {
+            "name": "quit_race",
+            "y": 0.828,
+            "keys": [
+              {
+                "key": "down",
+                "wait": 0.4
+              }
+            ]
+          }
+        ]
+      },
       "keys": [
         {
           "key": "enter",

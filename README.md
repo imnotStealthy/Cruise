@@ -12,15 +12,16 @@ and drive a **Discord Rich Presence** showing your live car, speed and gear.
 
 Standalone single-file build (no Python needed): **`dist\Cruise.exe`** (~18 MB) —
 the **native-window** build. On first launch it writes a default `config.json` (and a
-`cars.json` car database) next to the exe, so a bare `Cruise.exe` works on its own;
-`config.json` then stores your settings.
+`cars.json` car database) to `%USERPROFILE%\.cruise`, so a bare `Cruise.exe` works
+on its own; `config.json` then stores your settings.
 
 From source:
 - `py desktop.py` — native window (same UI as `Cruise.exe`)
 - `py server.py` — runs the UI in your browser (`127.0.0.1:8733`)
 
 Build the exe with `build_desktop.bat` (native, the shipped `Cruise.exe`) or
-`build.bat` (browser variant); both output `dist\Cruise.exe`.
+`build.bat` (browser variant); both output `dist\Cruise.exe`. Runtime settings
+and car data live in `%USERPROFILE%\.cruise`.
 
 ## Features
 

@@ -18,7 +18,6 @@ py -m PyInstaller --noconfirm --noconsole --onefile --name Cruise ^
   --collect-all vgamepad ^
   --collect-submodules pydirectinput ^
   desktop.py
-copy /Y config.json dist\config.json >nul
 echo.
 echo Done. Executable: dist\Cruise.exe  (native window, single file)
 pause

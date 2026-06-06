@@ -36,6 +36,8 @@ class Telemetry:
         self._lock = threading.Lock()
         self._speed_ms = 0.0
         self._race_on = False
+        self._max_rpm = 0.0
+        self._current_rpm = 0.0
         self._gear: int | None = None
         self._car_ordinal = 0
         self._ts = 0.0  # wall time of the last parsed packet
@@ -66,6 +68,8 @@ class Telemetry:
             n = len(data)
             try:
                 race_on = struct.unpack_from("<i", data, 0)[0]
+                max_rpm = struct.unpack_from("<f", data, 8)[0]
+                current_rpm = struct.unpack_from("<f", data, 16)[0]
                 vx, vy, vz = struct.unpack_from("<fff", data, 32)
                 speed_ms = (vx * vx + vy * vy + vz * vz) ** 0.5
                 # CarOrdinal lives in the V1 Sled block (robust). Gear lives in
@@ -81,6 +85,8 @@ class Telemetry:
             with self._lock:
                 self._race_on = bool(race_on)
                 self._speed_ms = speed_ms
+                self._max_rpm = max_rpm
+                self._current_rpm = current_rpm
                 self._gear = gear
                 self._car_ordinal = car_ordinal
                 self._ts = time.time()
@@ -97,6 +103,12 @@ class Telemetry:
         with self._lock:
             fresh = self._ts > 0.0 and (time.time() - self._ts) <= max_age
             return fresh, self._race_on, self._speed_ms * 3.6, self._gear, self._car_ordinal
+
+    def drivetrain(self, max_age: float = 1.0) -> tuple[bool, bool, float, int | None, float, float]:
+        """(fresh, race_on, speed_kmh, gear, current_rpm, max_rpm)."""
+        with self._lock:
+            fresh = self._ts > 0.0 and (time.time() - self._ts) <= max_age
+            return fresh, self._race_on, self._speed_ms * 3.6, self._gear, self._current_rpm, self._max_rpm
 
     def close(self) -> None:
         self._stop.set()

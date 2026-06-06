@@ -12,7 +12,7 @@ const els = {
   accelKey: $("accelKey"), steerKey: $("steerKey"), startDelay: $("startDelay"),
   pollInterval: $("pollInterval"), maxLaps: $("maxLaps"), throttleMod: $("throttleMod"), launchEase: $("launchEase"),
   saveBtn: $("saveBtn"), runBtn: $("runBtn"), pauseBtn: $("pauseBtn"), log: $("log"), clearLog: $("clearLog"),
-  modeSeg: $("modeSeg"), modeHint: $("modeHint"), accelLabel: $("accelLabel"),
+  modeSeg: $("modeSeg"), presetSeg: $("presetSeg"), modeHint: $("modeHint"), accelLabel: $("accelLabel"),
   steerField: $("steerField"), conn: $("conn"),
   gamePod: $("gamePod"), gameText: $("gameText"),
   dispPod: $("dispPod"), dispText: $("dispText"),
@@ -28,7 +28,9 @@ const els = {
 };
 
 let mode = "keyboard";
+let preset = "slowed";
 let running = false;
+let runBusy = false;
 let manualPaused = false;
 let gamepadAvailable = true;
 let elapsedS = 0;
@@ -60,7 +62,7 @@ function logLine(msg, cls = "l-sys") {
 function escapeHtml(s) { return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
 
 // ---- status -----------------------------------------------------------
-const LABELS = { stopped: "STOPPED", starting: "ARMING", racing: "RACING", results: "RESTART", prerace_menu: "MENU", paused: "PAUSED" };
+const LABELS = { stopped: "STOPPED", starting: "ARMING", racing: "RACING", results: "RESTART", restart_confirm: "CONFIRM", prerace_menu: "MENU", paused: "PAUSED" };
 function setStatus(state, laps, elapsed_s) {
   els.pod.dataset.state = state;
   els.statusText.textContent = LABELS[state] || state.toUpperCase();
@@ -94,6 +96,7 @@ function setInputsDisabled(d) {
     // bouton GAMEPAD grise si ViGEmBus absent (en plus du verrou pendant le run)
     b.disabled = d || (b.dataset.mode === "gamepad" && !gamepadAvailable);
   });
+  els.presetSeg.querySelectorAll(".seg-btn").forEach((b) => (b.disabled = d));
 }
 
 // ---- mode toggle ------------------------------------------------------
@@ -115,6 +118,12 @@ function applyMode(m) {
     els.modeHint.textContent = gamepadAvailable ? "DirectInput keystrokes." : els.modeHint.textContent;
     api("/api/gamepad-disconnect", { method: "POST" }).catch(() => {});  // manette OFF
   }
+}
+
+function applyPreset(p) {
+  preset = p === "fast" ? "fast" : "slowed";
+  els.presetSeg.querySelectorAll(".seg-btn").forEach((b) => b.classList.toggle("active", b.dataset.preset === preset));
+  els.pollInterval.value = preset === "fast" ? "0.2" : "1.0";
 }
 // Verifie ViGEmBus (sans brancher) -> active/grise le bouton GAMEPAD.
 async function checkGamepad() {
@@ -143,6 +152,7 @@ async function loadConfig() {
   els.steerKey.value = c.steer_key ?? "";
   els.startDelay.value = c.start_delay_s ?? 4;
   els.pollInterval.value = c.loop_poll_s ?? 1.0;
+  applyPreset(c.automation_preset === "fast" ? "fast" : "slowed");
   els.throttleMod.checked = !!c.throttle_modulation;
   els.launchEase.checked = !!c.launch_ease;
   els.telEnabled.checked = c.telemetry_enabled !== false;
@@ -186,6 +196,7 @@ function collectConfig() {
     steer_key: els.steerKey.value.trim() || null,
     start_delay_s: startDelay,
     loop_poll_s: pollInterval,
+    automation_preset: preset,
     throttle_modulation: els.throttleMod.checked,
     launch_ease: els.launchEase.checked,
   };
@@ -200,6 +211,9 @@ async function saveConfig() {
 
 // ---- run --------------------------------------------------------------
 async function toggleRun() {
+  if (runBusy) return;
+  runBusy = true;
+  els.runBtn.disabled = true;
   try {
     if (running) { await api("/api/stop", { method: "POST" }); return; }
     await saveConfig();
@@ -211,6 +225,9 @@ async function toggleRun() {
     });
   } catch (e) {
     logLine(e.message, "l-err");
+  } finally {
+    runBusy = false;
+    els.runBtn.disabled = false;
   }
 }
 
@@ -255,6 +272,10 @@ function connect() {
 els.modeSeg.addEventListener("click", (e) => {
   const b = e.target.closest(".seg-btn");
   if (b && !b.disabled) applyMode(b.dataset.mode);
+});
+els.presetSeg.addEventListener("click", (e) => {
+  const b = e.target.closest(".seg-btn");
+  if (b && !b.disabled) applyPreset(b.dataset.preset);
 });
 els.saveBtn.addEventListener("click", () => saveConfig().catch((e) => logLine(e.message, "l-err")));
 els.runBtn.addEventListener("click", toggleRun);

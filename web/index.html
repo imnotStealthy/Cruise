@@ -92,6 +92,13 @@
             <input id="pollInterval" class="inp" value="1.0" inputmode="decimal" />
           </div>
           <div class="field">
+            <label class="field-label">PRESET</label>
+            <div class="seg mini-seg" id="presetSeg">
+              <button data-preset="slowed" class="seg-btn active">SLOWED</button>
+              <button data-preset="fast" class="seg-btn">FAST</button>
+            </div>
+          </div>
+          <div class="field">
             <label class="field-label">MAX LAPS <span class="opt">(0 = infinite)</span></label>
             <input id="maxLaps" class="inp" value="0" inputmode="numeric" />
           </div>
@@ -180,6 +187,17 @@
       <div class="card-bar"></div>
       <h2 class="card-title">EVENTLAB CODES</h2>
       <div class="codes-list mode-pane active" data-mode-pane="skill-points">
+        <div class="code-card">
+          <div class="code-meta">
+            <h3>15 SECONDS = 10 SKILL POINTS</h3>
+            <p>JJOEY ROCKET - 1998 Subaru Impreza 22B-STi - 0.6 km</p>
+            <span class="badge">SKILL POINTS</span>
+          </div>
+          <div class="code-actions">
+            <span class="code-val">362 177 064</span>
+            <button class="copy-btn" data-code="362 177 064">COPY</button>
+          </div>
+        </div>
         <div class="code-card">
           <div class="code-meta">
             <h3>10 SKILL POINTS — INSTANT FARM</h3>

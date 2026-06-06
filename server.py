@@ -110,6 +110,69 @@ def _int_range(value, field: str, minimum: int, maximum: int) -> int:
     return number
 
 
+def _state(cfg: dict, name: str) -> dict | None:
+    return next((s for s in cfg.get("states", []) if s.get("name") == name), None)
+
+
+def _apply_automation_preset(cfg: dict, preset: str) -> None:
+    presets = {
+        "slowed": {
+            "loop_poll_s": 1.0,
+            "menu_wait_s": 0.55,
+            "menu_enter_wait_s": 1.0,
+            "results_spam_count": 1,
+            "results_x_wait_s": 1.2,
+            "results_post_wait_s": 1.0,
+            "confirm_nav_wait_s": 0.5,
+            "confirm_spam_count": 1,
+            "confirm_enter_wait_s": 1.0,
+            "confirm_post_wait_s": 8.0,
+        },
+        "fast": {
+            "loop_poll_s": 0.1,
+            "menu_wait_s": 0.08,
+            "menu_enter_wait_s": 0.08,
+            "results_spam_count": 5,
+            "results_x_wait_s": 0.05,
+            "results_post_wait_s": 0.05,
+            "confirm_nav_wait_s": 0.08,
+            "confirm_spam_count": 5,
+            "confirm_enter_wait_s": 0.05,
+            "confirm_post_wait_s": 5.0,
+        },
+    }
+    values = presets[preset]
+    cfg["automation_preset"] = preset
+    cfg["loop_poll_s"] = values["loop_poll_s"]
+
+    prerace = _state(cfg, "prerace_menu")
+    if prerace:
+        for row in prerace.get("selected_menu", {}).get("rows", []):
+            for step in row.get("keys", []):
+                step["wait"] = values["menu_wait_s"]
+        for step in prerace.get("keys", []):
+            step["wait"] = values["menu_enter_wait_s"]
+
+    results = _state(cfg, "results")
+    if results:
+        results["keys"] = [
+            {"key": "x", "wait": values["results_x_wait_s"]}
+            for _ in range(values["results_spam_count"])
+        ]
+        results["post_wait_s"] = values["results_post_wait_s"]
+
+    confirm = _state(cfg, "restart_confirm")
+    if confirm:
+        for row in confirm.get("selected_menu", {}).get("rows", []):
+            for step in row.get("keys", []):
+                step["wait"] = values["confirm_nav_wait_s"]
+        confirm["keys"] = [
+            {"key": "enter", "wait": values["confirm_enter_wait_s"]}
+            for _ in range(values["confirm_spam_count"])
+        ]
+        confirm["post_wait_s"] = values["confirm_post_wait_s"]
+
+
 def _apply_config_update(cfg: dict, data: dict) -> dict:
     if "input_backend" in data:
         if data["input_backend"] not in ("keyboard", "gamepad"):
@@ -123,6 +186,11 @@ def _apply_config_update(cfg: dict, data: dict) -> dict:
         cfg["start_delay_s"] = _float_range(data["start_delay_s"], "start_delay_s", 0.0, 60.0)
     if "loop_poll_s" in data:
         cfg["loop_poll_s"] = _float_range(data["loop_poll_s"], "loop_poll_s", 0.1, 60.0)
+    if "automation_preset" in data:
+        preset = data["automation_preset"]
+        if preset not in ("slowed", "fast"):
+            _bad_request("automation_preset must be slowed or fast")
+        _apply_automation_preset(cfg, preset)
     if "throttle_modulation" in data:
         cfg["throttle_modulation"] = bool(data["throttle_modulation"])
     if "launch_ease" in data:

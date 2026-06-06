@@ -74,7 +74,11 @@ class KeyboardBackend(InputBackend):
             self._steer_down = False
 
     def tap(self, action: str) -> None:
-        self._pdi.press(action)
+        # keyDown + short hold + keyUp: a 0 ms press (pydirectinput.press with
+        # PAUSE=0) is often missed by FH6 menus -> Enter/arrows don't register.
+        self._pdi.keyDown(action)
+        time.sleep(0.06)
+        self._pdi.keyUp(action)
 
     def recover(self, direction: str, reverse_s: float = 1.0, steer_s: float = 0.8) -> None:
         sd = self.left_key if direction == "left" else self.right_key
@@ -145,6 +149,10 @@ class GamepadBackend(InputBackend):
             "y": B.XUSB_GAMEPAD_Y,
             "esc": B.XUSB_GAMEPAD_B,
             "space": B.XUSB_GAMEPAD_BACK,
+            "up": B.XUSB_GAMEPAD_DPAD_UP,
+            "down": B.XUSB_GAMEPAD_DPAD_DOWN,
+            "left": B.XUSB_GAMEPAD_DPAD_LEFT,
+            "right": B.XUSB_GAMEPAD_DPAD_RIGHT,
         }
         self._default = B.XUSB_GAMEPAD_A
         self._accel_down = False

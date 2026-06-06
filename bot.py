@@ -30,13 +30,12 @@ from window import (  # noqa: F401
     select_game_window,
 )
 
-# Frozen (.exe PyInstaller): config.json next to the exe (persistence).
-# Otherwise: next to the script.
 _BASE = Path(sys.executable).parent if getattr(sys, "frozen", False) else Path(__file__).parent
 # Bundle dir (PyInstaller _MEIPASS) holds the default config shipped inside the
 # exe -> a fresh Cruise.exe with no sibling files seeds itself on first run.
 _MEI = Path(getattr(sys, "_MEIPASS", _BASE))
-CONFIG_PATH = _BASE / "config.json"
+DATA_DIR = Path.home() / ".cruise"
+CONFIG_PATH = DATA_DIR / "config.json"
 
 # Stuck-detection sampling grid: fractional points over the lower-center of the
 # FH6 window (road + scenery + car), avoiding HUD corners. When driving these
@@ -50,6 +49,7 @@ def _seed_file(path: Path) -> None:
         return
     src = _MEI / path.name
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         if src.exists() and src.resolve() != path.resolve():
             path.write_bytes(src.read_bytes())
     except OSError:
@@ -105,6 +105,27 @@ def state_active(state: dict, rect: tuple[int, int, int, int]) -> bool:
     return all(checks) if state.get("match_mode", "all") == "all" else any(checks)
 
 
+def selected_menu_keys(state: dict, rect: tuple[int, int, int, int]) -> list[dict] | None:
+    """Return navigation keys needed to move the current menu selection to target.
+
+    FH6 wraps menu navigation, so a fixed "up xN" sequence cannot normalize every
+    starting row. The selected row has a dark fill; unselected rows are white.
+    """
+    menu = state.get("selected_menu")
+    if not menu:
+        return []
+    ox, oy, w, h = rect
+    x = ox + resolve(menu.get("x", 0.18), w)
+    dark_max = int(menu.get("dark_max", 120))
+    with screen.dc_session():
+        for row in menu.get("rows", []):
+            y = oy + resolve(row["y"], h)
+            rgb = screen.pixel(x, y)
+            if sum(rgb) / 3 <= dark_max:
+                return row.get("keys", [])
+    return None if menu.get("required", True) else []
+
+
 def detect_state(cfg: dict, rect: tuple[int, int, int, int] | None = None) -> dict | None:
     if rect is None:
         rect = detection_rect(cfg)
@@ -131,6 +152,14 @@ def _duration(value, default: float, minimum: float = 0.0) -> float:
     except (TypeError, ValueError):
         duration = default
     return max(minimum, duration)
+
+
+def _ratio(value, default: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError):
+        ratio = default
+    return max(minimum, min(maximum, ratio))
 
 
 def _launch_feather(backend, duration: float, stop, hold: float = 0.45, lift: float = 0.3) -> None:
@@ -227,11 +256,59 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
     launch_ease = bool(cfg.get("launch_ease", False))
     launch_ease_s = _duration(cfg.get("launch_ease_s"), 4.0, 0.5)
 
+    # Manual gearbox assist: if telemetry shows the car sitting at the limiter,
+    # tap the configured upshift key. Automatic shifting usually changes gear
+    # before this dwell timer expires, so no explicit mode toggle is needed.
+    shift_assist = bool(cfg.get("manual_shift_assist", True))
+    shift_up_ratio = _ratio(cfg.get("shift_up_rpm_ratio"), 0.90, 0.5, 1.0)
+    shift_detect_s = _duration(cfg.get("shift_detect_s"), 0.25, 0.1)
+    shift_cooldown = _duration(cfg.get("shift_cooldown_s"), 0.9, 0.2)
+    shift_min_speed = _duration(cfg.get("shift_min_speed_kmh"), 8.0)
+    if backend.name == "gamepad":
+        shift_up_key = cfg.get("gamepad_shift_up_key", "b")
+    else:
+        shift_up_key = cfg.get("shift_up_key", "e")
+    high_rpm_since = 0.0
+    high_rpm_gear = None
+    last_shift = 0.0
+
     def reset_stuck() -> None:
         nonlocal last_sig, stuck_since, last_lift
         last_sig = None
         stuck_since = time.time()
         last_lift = time.time()
+
+    def maybe_shift_up() -> None:
+        nonlocal high_rpm_since, high_rpm_gear, last_shift
+        if not (shift_assist and telem):
+            return
+        fresh, race_on, speed_kmh, gear, current_rpm, max_rpm = telem.drivetrain()
+        if not (fresh and race_on and max_rpm > 0.0 and speed_kmh >= shift_min_speed):
+            high_rpm_since = 0.0
+            high_rpm_gear = None
+            return
+        if current_rpm / max_rpm < shift_up_ratio:
+            high_rpm_since = 0.0
+            high_rpm_gear = None
+            return
+        now = time.time()
+        if high_rpm_since <= 0.0 or gear != high_rpm_gear:
+            high_rpm_since = now
+            high_rpm_gear = gear
+            return
+        if now - high_rpm_since >= shift_detect_s and now - last_shift >= shift_cooldown:
+            log(f"Manual shift assist -> '{shift_up_key}' ({current_rpm / max_rpm:.0%} rpm).")
+            backend.tap(shift_up_key)
+            last_shift = now
+            high_rpm_since = now
+
+    def drive_wait(duration: float) -> None:
+        end = time.time() + max(0.0, duration)
+        while time.time() < end:
+            if stop is not None and stop.is_set():
+                return
+            maybe_shift_up()
+            _sleep(min(0.1, end - time.time()), stop)
 
     def enter_pause(reason: str) -> None:
         nonlocal paused
@@ -301,10 +378,16 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 reset_stuck()  # menus/results/countdown are not "racing"
                 backend.release_accelerate()
                 backend.release_steer()
-                keys = [k["key"] for k in state.get("keys", [])]
+                menu_keys = selected_menu_keys(state, rect)
+                if menu_keys is None:
+                    log(f"[{state['name']}] selected menu row not detected; waiting.")
+                    _sleep(loop_poll, stop)
+                    continue
+                steps = menu_keys + state.get("keys", [])
+                keys = [k["key"] for k in steps]
                 log(f"[{state['name']}] -> {keys}")
                 status(state["name"])
-                for step in state.get("keys", []):
+                for step in steps:
                     backend.tap(step["key"])
                     _sleep(_duration(step.get("wait"), 0.5), stop)
                 # 1 lap counts only on the state marked count_lap (Start Race Event),
@@ -325,10 +408,10 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                         # feather the launch, then full throttle for the remainder
                         ease = min(launch_ease_s, post_wait)
                         _launch_feather(backend, ease, stop)
-                        _sleep(post_wait - ease, stop)
+                        drive_wait(post_wait - ease)
                     else:
                         backend.hold_accelerate()
-                        _sleep(post_wait, stop)
+                        drive_wait(post_wait)
                 else:
                     _sleep(post_wait, stop)
                 reset_stuck()  # fresh launch -> reset stuck/modulation timers
@@ -375,6 +458,8 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 _sleep(throttle_lift, stop)
                 backend.hold_accelerate()
                 last_lift = time.time()
+
+            maybe_shift_up()
 
             _sleep(loop_poll, stop)
     except KeyboardInterrupt:
