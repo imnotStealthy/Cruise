@@ -19,7 +19,7 @@ class InputBackend:
     def release_accelerate(self) -> None: ...
     def hold_steer(self) -> None: ...
     def release_steer(self) -> None: ...
-    def tap(self, action: str) -> None: ...
+    def tap(self, action: str, hold_s: float | None = None) -> None: ...
     def recover(self, direction: str, reverse_s: float = 1.0, steer_s: float = 0.8) -> None:
         """Unstick maneuver: back up while turning, then drive forward turning to
         clear the obstacle. direction = 'left' | 'right'. Leaves accelerate held."""
@@ -34,7 +34,7 @@ class KeyboardBackend(InputBackend):
 
     def __init__(self, accel_key: str = "w", steer_key: str | None = None,
                  reverse_key: str = "s", left_key: str = "a", right_key: str = "d",
-                 rewind_key: str = "r") -> None:
+                 rewind_key: str = "r", tap_hold_s: float = 0.06) -> None:
         import pydirectinput
         pydirectinput.PAUSE = 0.0
         self._pdi = pydirectinput
@@ -44,6 +44,7 @@ class KeyboardBackend(InputBackend):
         self.left_key = left_key
         self.right_key = right_key
         self.rewind_key = rewind_key
+        self.tap_hold_s = tap_hold_s
         self._accel_down = False
         self._steer_down = False
 
@@ -73,11 +74,11 @@ class KeyboardBackend(InputBackend):
             self._pdi.keyUp(self.steer)
             self._steer_down = False
 
-    def tap(self, action: str) -> None:
+    def tap(self, action: str, hold_s: float | None = None) -> None:
         # keyDown + short hold + keyUp: a 0 ms press (pydirectinput.press with
         # PAUSE=0) is often missed by FH6 menus -> Enter/arrows don't register.
         self._pdi.keyDown(action)
-        time.sleep(0.06)
+        time.sleep(self.tap_hold_s if hold_s is None else max(0.0, hold_s))
         self._pdi.keyUp(action)
 
     def recover(self, direction: str, reverse_s: float = 1.0, steer_s: float = 0.8) -> None:
@@ -135,7 +136,7 @@ class GamepadBackend(InputBackend):
     """Persistent virtual Xbox360 gamepad. Accelerate = right trigger (RT)."""
     name = "gamepad"
 
-    def __init__(self, steer_key: str | None = None) -> None:
+    def __init__(self, steer_key: str | None = None, tap_hold_s: float = 0.08) -> None:
         import vgamepad as vg
         self._vg = vg
         self.pad = _get_shared_pad()
@@ -156,6 +157,7 @@ class GamepadBackend(InputBackend):
         }
         self._default = B.XUSB_GAMEPAD_A
         self._accel_down = False
+        self.tap_hold_s = tap_hold_s
 
     def hold_accelerate(self) -> None:
         if not self._accel_down:
@@ -180,11 +182,11 @@ class GamepadBackend(InputBackend):
     def release_steer(self) -> None:
         pass
 
-    def tap(self, action: str) -> None:
+    def tap(self, action: str, hold_s: float | None = None) -> None:
         btn = self.button_map.get(action.lower(), self._default)
         self.pad.press_button(button=btn)
         self.pad.update()
-        time.sleep(0.08)
+        time.sleep(self.tap_hold_s if hold_s is None else max(0.0, hold_s))
         self.pad.release_button(button=btn)
         self.pad.update()
 
@@ -248,10 +250,14 @@ def connect_gamepad() -> bool:
 def make_backend(cfg: dict) -> InputBackend:
     mode = cfg.get("input_backend", "keyboard")
     if mode == "gamepad":
-        return GamepadBackend(steer_key=cfg.get("steer_key"))
+        return GamepadBackend(
+            steer_key=cfg.get("steer_key"),
+            tap_hold_s=float(cfg.get("gamepad_tap_hold_s", 0.08)),
+        )
     return KeyboardBackend(
         cfg.get("accelerate_key", "w"), cfg.get("steer_key"),
         cfg.get("reverse_key", "s"),
         cfg.get("steer_left_key", "a"), cfg.get("steer_right_key", "d"),
         rewind_key=cfg.get("rewind_key", "r"),
+        tap_hold_s=float(cfg.get("keyboard_tap_hold_s", 0.06)),
     )

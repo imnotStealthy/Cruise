@@ -67,8 +67,13 @@ def already_running() -> bool:
     Returns True if another Cruise instance already owns it."""
     global _mutex_handle
     kernel32 = ctypes.windll.kernel32
-    _mutex_handle = kernel32.CreateMutexW(None, False, _MUTEX_NAME)
-    return kernel32.GetLastError() == 183  # ERROR_ALREADY_EXISTS
+    handle = kernel32.CreateMutexW(None, True, _MUTEX_NAME)
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        if handle:
+            kernel32.CloseHandle(handle)
+        return True
+    _mutex_handle = handle
+    return False
 
 
 def _bad_request(msg: str) -> None:
@@ -118,32 +123,63 @@ def _apply_automation_preset(cfg: dict, preset: str) -> None:
     presets = {
         "slowed": {
             "loop_poll_s": 1.0,
+            "keyboard_tap_hold_s": 0.06,
+            "gamepad_tap_hold_s": 0.08,
             "menu_wait_s": 0.55,
             "menu_enter_wait_s": 1.0,
-            "results_spam_count": 1,
             "results_x_wait_s": 1.2,
             "results_post_wait_s": 1.0,
             "confirm_nav_wait_s": 0.5,
-            "confirm_spam_count": 1,
             "confirm_enter_wait_s": 1.0,
             "confirm_post_wait_s": 8.0,
+            "prerace_post_wait_s": 8.0,
+            "wait_until_state_change": False,
+            "fast_post_race_skip": False,
         },
         "fast": {
-            "loop_poll_s": 0.1,
-            "menu_wait_s": 0.08,
-            "menu_enter_wait_s": 0.08,
-            "results_spam_count": 5,
-            "results_x_wait_s": 0.05,
-            "results_post_wait_s": 0.05,
-            "confirm_nav_wait_s": 0.08,
-            "confirm_spam_count": 5,
-            "confirm_enter_wait_s": 0.05,
-            "confirm_post_wait_s": 5.0,
+            "loop_poll_s": 0.01,
+            "keyboard_tap_hold_s": 0.02,
+            "gamepad_tap_hold_s": 0.025,
+            "menu_wait_s": 0.01,
+            "menu_enter_wait_s": 0.02,
+            "results_spam_count": 100,
+            "results_x_wait_s": 0.025,
+            "results_retry_s": 3.2,
+            "results_post_wait_s": 0.0,
+            "confirm_nav_wait_s": 0.02,
+            "confirm_spam_count": 24,
+            "confirm_enter_wait_s": 0.03,
+            "confirm_retry_s": 1.3,
+            "confirm_post_wait_s": 0.0,
+            "prerace_post_wait_s": 4.5,
+            "wait_until_state_change": True,
+            "fast_post_race_skip": True,
+            "menu_resume_tries": 1,
+            "await_confirm_s": 3.0,
+            "relaunch_drive_s": 4.5,
         },
     }
     values = presets[preset]
     cfg["automation_preset"] = preset
     cfg["loop_poll_s"] = values["loop_poll_s"]
+    cfg["keyboard_tap_hold_s"] = values["keyboard_tap_hold_s"]
+    cfg["gamepad_tap_hold_s"] = values["gamepad_tap_hold_s"]
+    cfg["fast_post_race_skip"] = values["fast_post_race_skip"]
+    cfg["menu_resume_tries"] = values.get("menu_resume_tries", 3)
+    cfg["await_confirm_s"] = values.get("await_confirm_s", 0.0)
+    cfg["relaunch_drive_s"] = values.get("relaunch_drive_s", 0.0)
+    if preset == "fast":
+        cfg["fast_post_race_spam"] = {
+            "key": "x",
+            "count": 45,
+            "interval_s": 0.035,
+            "tap_hold_s": values["keyboard_tap_hold_s"],
+            "gamepad_tap_hold_s": values["gamepad_tap_hold_s"],
+            "stop_on_state_change": True,
+            "check_state_every": 1,
+        }
+    else:
+        cfg.pop("fast_post_race_spam", None)
 
     prerace = _state(cfg, "prerace_menu")
     if prerace:
@@ -152,25 +188,64 @@ def _apply_automation_preset(cfg: dict, preset: str) -> None:
                 step["wait"] = values["menu_wait_s"]
         for step in prerace.get("keys", []):
             step["wait"] = values["menu_enter_wait_s"]
+            step["tap_hold_s"] = values["keyboard_tap_hold_s"]
+            step["gamepad_tap_hold_s"] = values["gamepad_tap_hold_s"]
+        prerace["post_wait_s"] = values["prerace_post_wait_s"]
+        prerace["wait_until_state_change"] = values["wait_until_state_change"]
 
     results = _state(cfg, "results")
     if results:
-        results["keys"] = [
-            {"key": "x", "wait": values["results_x_wait_s"]}
-            for _ in range(values["results_spam_count"])
-        ]
+        if preset == "fast":
+            results["keys"] = []
+            results["spam"] = {
+                "key": "x",
+                "count": values["results_spam_count"],
+                "interval_s": values["results_x_wait_s"],
+                "duration_s": values["results_retry_s"],
+                "tap_hold_s": values["keyboard_tap_hold_s"],
+                "gamepad_tap_hold_s": values["gamepad_tap_hold_s"],
+                "stop_on_state_change": True,
+                "check_state_every": 1,
+                "fallback_keys": [{"key": "x", "wait": 0.08, "tap_hold_s": 0.04, "gamepad_tap_hold_s": 0.05}],
+            }
+        else:
+            results["keys"] = [{"key": "x", "wait": values["results_x_wait_s"]}]
+            results.pop("spam", None)
         results["post_wait_s"] = values["results_post_wait_s"]
+        results["wait_until_state_change"] = values["wait_until_state_change"]
 
     confirm = _state(cfg, "restart_confirm")
     if confirm:
         for row in confirm.get("selected_menu", {}).get("rows", []):
             for step in row.get("keys", []):
                 step["wait"] = values["confirm_nav_wait_s"]
-        confirm["keys"] = [
-            {"key": "enter", "wait": values["confirm_enter_wait_s"]}
-            for _ in range(values["confirm_spam_count"])
-        ]
+                step["tap_hold_s"] = values["keyboard_tap_hold_s"]
+                step["gamepad_tap_hold_s"] = values["gamepad_tap_hold_s"]
+        if preset == "fast":
+            confirm["keys"] = []
+            confirm["selected_menu_fallback_keys"] = [{
+                "key": "up",
+                "wait": values["confirm_nav_wait_s"],
+                "tap_hold_s": values["keyboard_tap_hold_s"],
+                "gamepad_tap_hold_s": values["gamepad_tap_hold_s"],
+            }]
+            confirm["spam"] = {
+                "key": "enter",
+                "count": values["confirm_spam_count"],
+                "interval_s": values["confirm_enter_wait_s"],
+                "duration_s": values["confirm_retry_s"],
+                "tap_hold_s": values["keyboard_tap_hold_s"],
+                "gamepad_tap_hold_s": values["gamepad_tap_hold_s"],
+                "stop_on_state_change": True,
+                "check_state_every": 1,
+                "fallback_keys": [{"key": "enter", "wait": 0.08, "tap_hold_s": 0.04, "gamepad_tap_hold_s": 0.05}],
+            }
+        else:
+            confirm["keys"] = [{"key": "enter", "wait": values["confirm_enter_wait_s"]}]
+            confirm.pop("spam", None)
+            confirm.pop("selected_menu_fallback_keys", None)
         confirm["post_wait_s"] = values["confirm_post_wait_s"]
+        confirm["wait_until_state_change"] = values["wait_until_state_change"]
 
 
 def _apply_config_update(cfg: dict, data: dict) -> dict:
@@ -185,7 +260,7 @@ def _apply_config_update(cfg: dict, data: dict) -> dict:
     if "start_delay_s" in data:
         cfg["start_delay_s"] = _float_range(data["start_delay_s"], "start_delay_s", 0.0, 60.0)
     if "loop_poll_s" in data:
-        cfg["loop_poll_s"] = _float_range(data["loop_poll_s"], "loop_poll_s", 0.1, 60.0)
+        cfg["loop_poll_s"] = _float_range(data["loop_poll_s"], "loop_poll_s", 0.01, 60.0)
     if "automation_preset" in data:
         preset = data["automation_preset"]
         if preset not in ("slowed", "fast"):
@@ -228,15 +303,61 @@ class Bot:
         self.state = "stopped"
         self.laps = 0
         self.started_at: float | None = None
+        self.phase_name: str | None = None
+        self.phase_started_at: float | None = None
 
     def _publish(self, ev: dict) -> None:
         for q in list(self.subs):
             q.put(ev)
 
+    def _phase_log(self, name: str, elapsed: float) -> None:
+        self._publish({"type": "log", "msg": f"[timing] {name}: {elapsed:.2f}s"})
+
+    def _race_signal_on(self) -> bool:
+        t = telemetry.current()
+        fresh, race_on, _kmh = t.snapshot() if t else (False, False, 0.0)
+        return fresh and race_on
+
+    def _set_phase(self, name: str | None, now: float) -> None:
+        self.phase_name = name
+        self.phase_started_at = now if name else None
+
+    def _track_phase_timing(self, state: str) -> None:
+        now = time.time()
+        phase = self.phase_name
+        started = self.phase_started_at
+        if state == "stopped":
+            self._set_phase(None, now)
+            return
+        if state == "racing":
+            if phase == "relaunch" and started is not None:
+                if self._race_signal_on():
+                    self._phase_log("relance", now - started)
+                    self._set_phase("race", now)
+                return
+            self._set_phase("race", now)
+            return
+        if state == "results":
+            if phase == "race" and started is not None:
+                self._phase_log("race", now - started)
+            self._set_phase("results", now)
+            return
+        if state == "restart_confirm":
+            if phase == "results" and started is not None:
+                self._phase_log("results", now - started)
+            self._set_phase("relaunch", now)
+            return
+        if state == "prerace_menu" and phase in ("results", "restart_confirm"):
+            if started is not None:
+                self._phase_log(phase, now - started)
+            self._set_phase("relaunch", now)
+
     def on_log(self, msg: str) -> None:
         self._publish({"type": "log", "msg": msg})
 
     def on_status(self, state: str, laps: int) -> None:
+        if state != self.state or (state == "racing" and self.phase_name == "relaunch"):
+            self._track_phase_timing(state)
         self.state, self.laps = state, laps
         if state == "stopped":
             self.started_at = None

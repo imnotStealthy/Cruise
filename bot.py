@@ -129,8 +129,9 @@ def selected_menu_keys(state: dict, rect: tuple[int, int, int, int]) -> list[dic
 def detect_state(cfg: dict, rect: tuple[int, int, int, int] | None = None) -> dict | None:
     if rect is None:
         rect = detection_rect(cfg)
+    states = sorted(cfg["states"], key=lambda s: int(s.get("priority", 0)), reverse=True)
     with screen.dc_session():  # a single screen DC for all pixels in the poll
-        for state in cfg["states"]:
+        for state in states:
             if state_active(state, rect):
                 return state
     return None
@@ -160,6 +161,14 @@ def _ratio(value, default: float, minimum: float = 0.0, maximum: float = 1.0) ->
     except (TypeError, ValueError):
         ratio = default
     return max(minimum, min(maximum, ratio))
+
+
+def _count(value, default: int, minimum: int = 0, maximum: int = 100) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        count = default
+    return max(minimum, min(maximum, count))
 
 
 def _launch_feather(backend, duration: float, stop, hold: float = 0.45, lift: float = 0.3) -> None:
@@ -198,7 +207,7 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
 
     backend = inputs.make_backend(cfg)
     start_delay = _duration(cfg.get("start_delay_s"), 0.0)
-    loop_poll = _duration(cfg.get("loop_poll_s"), 1.0, 0.1)
+    loop_poll = _duration(cfg.get("loop_poll_s"), 1.0, 0.01)
     status("starting")
     focused = window.focus_game_window(cfg)
     log(f"Input: {backend.name}. Game focus: {'ok' if focused else 'window not found'}.")
@@ -243,6 +252,13 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
     stuck_since = time.time()
     recover_dir = "right"   # alternates each recovery to try both sides
     last_recover = 0.0
+    race_seen = False
+    post_race_skip_sent = False
+    await_confirm_until = 0.0
+    relaunch_drive_until = 0.0
+    ignored_racing_state = None
+    visual_results_at = None
+    visual_results_delay_logged = False
 
     # Optional throttle modulation: brief periodic throttle lift so the in-game
     # braking assist / engine braking slows the car for corners (off by default).
@@ -310,6 +326,152 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
             maybe_shift_up()
             _sleep(min(0.1, end - time.time()), stop)
 
+    def state_changed_from(name: str, rect: tuple[int, int, int, int]) -> bool:
+        current = detect_state(cfg, rect)
+        return current is None or current.get("name") != name
+
+    def wait_until_state_change(name: str, rect: tuple[int, int, int, int], timeout_s: float) -> bool:
+        end = time.time() + max(0.0, timeout_s)
+        while time.time() < end:
+            if stop is not None and stop.is_set():
+                return False
+            if state_changed_from(name, rect):
+                return True
+            _sleep(min(loop_poll, 0.05, end - time.time()), stop)
+        return False
+
+    def wait_until_launch_signal(name: str, rect: tuple[int, int, int, int], timeout_s: float) -> bool:
+        end = time.time() + max(0.0, timeout_s)
+        while time.time() < end:
+            if stop is not None and stop.is_set():
+                return False
+            fresh, race_on, _speed_kmh = telem.snapshot() if telem else (False, False, 0.0)
+            if fresh and race_on:
+                return True
+            if state_changed_from(name, rect):
+                return True
+            _sleep(min(loop_poll, 0.05, end - time.time()), stop)
+        return False
+
+    def action_hold_s(action: dict):
+        if backend.name == "gamepad" and action.get("gamepad_tap_hold_s") is not None:
+            return action.get("gamepad_tap_hold_s")
+        return action.get("tap_hold_s")
+
+    def tap_step(step: dict) -> None:
+        backend.tap(step["key"], action_hold_s(step))
+
+    def execute_steps(steps: list[dict]) -> list[str]:
+        keys = []
+        for step in steps:
+            keys.append(step["key"])
+            tap_step(step)
+            _sleep(_duration(step.get("wait"), 0.5), stop)
+        return keys
+
+    def execute_spam(spam: dict | None, state_name: str, rect: tuple[int, int, int, int]) -> tuple[list[str], bool]:
+        if not spam:
+            return [], False
+        key = spam.get("key")
+        if not key:
+            return [], False
+        count = _count(spam.get("count"), 1, 1)
+        interval = _duration(spam.get("interval_s"), 0.05)
+        hold_s = action_hold_s(spam)
+        duration_s = spam.get("duration_s")
+        stop_on_change = bool(spam.get("stop_on_state_change", False))
+        blind = bool(spam.get("blind", False))
+        check_every = _count(spam.get("check_state_every"), 1, 1)
+        end = time.time() + _duration(duration_s, 0.0) if duration_s is not None else None
+        keys = []
+        changed = False
+        sent = 0
+        while sent < count and (end is None or time.time() < end):
+            if stop is not None and stop.is_set():
+                break
+            backend.tap(key, hold_s)
+            keys.append(key)
+            sent += 1
+            if not blind and stop_on_change and sent % check_every == 0 and state_changed_from(state_name, rect):
+                changed = True
+                break
+            _sleep(interval, stop)
+            if not blind and stop_on_change and sent % check_every == 0 and state_changed_from(state_name, rect):
+                changed = True
+                break
+        if not blind and not changed and stop_on_change and state_changed_from(state_name, rect):
+            changed = True
+        if not changed and spam.get("fallback_keys"):
+            log(f"[{state_name}] fast spam did not change state; fallback keys.")
+            keys.extend(execute_steps(spam.get("fallback_keys", [])))
+            changed = state_changed_from(state_name, rect)
+        then_spam = spam.get("then_spam", [])
+        if isinstance(then_spam, dict):
+            then_spam = [then_spam]
+        for followup in then_spam:
+            follow_keys, follow_changed = execute_spam(followup, state_name, rect)
+            keys.extend(follow_keys)
+            changed = changed or follow_changed
+        return keys, changed
+
+    def execute_results_combo(spam: dict | None, rect: tuple[int, int, int, int]) -> tuple[list[str], bool]:
+        if not spam:
+            return [], False
+        timeout_s = _duration(spam.get("duration_s"), 3.0, 0.1)
+        interval = _duration(spam.get("interval_s"), 0.03)
+        hold_s = action_hold_s(spam)
+        end = time.time() + timeout_s
+        keys = []
+        changed = False
+        while time.time() < end:
+            if stop is not None and stop.is_set():
+                break
+            backend.tap("x", hold_s)
+            keys.append("x")
+            _sleep(interval, stop)
+            backend.tap("enter", hold_s)
+            keys.append("enter")
+            _sleep(interval, stop)
+            current = detect_state(cfg, rect)
+            current_name = current.get("name") if current else None
+            if current_name not in ("results", "restart_confirm"):
+                changed = True
+                break
+        if not changed and spam.get("fallback_keys"):
+            log("[results] fast visual combo did not change state; fallback keys.")
+            keys.extend(execute_steps(spam.get("fallback_keys", [])))
+            changed = state_changed_from("results", rect)
+        return keys, changed
+
+    def maybe_fast_post_race_skip(rect: tuple[int, int, int, int]) -> bool:
+        nonlocal race_seen, post_race_skip_sent
+        if not (cfg.get("automation_preset") == "fast" and cfg.get("fast_post_race_skip", True) and telem):
+            return False
+        fresh, race_on, _speed_kmh = telem.snapshot()
+        if not fresh:
+            return False
+        if race_on:
+            race_seen = True
+            post_race_skip_sent = False
+            return False
+        if not race_seen or post_race_skip_sent:
+            return False
+        backend.release_accelerate()
+        backend.release_steer()
+        spam = cfg.get("fast_post_race_spam", {
+            "key": "x",
+            "count": 10,
+            "interval_s": 0.003,
+            "tap_hold_s": 0.01,
+            "gamepad_tap_hold_s": 0.015,
+            "stop_on_state_change": True,
+            "check_state_every": 4,
+        })
+        log("[post_race] telemetry race_off -> fast result skip.")
+        execute_spam(spam, "post_race", rect)
+        post_race_skip_sent = True
+        return True
+
     def enter_pause(reason: str) -> None:
         nonlocal paused
         backend.release_accelerate()
@@ -349,25 +511,58 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
 
             rect = win[3] if win else detection_rect(cfg)
             state = detect_state(cfg, rect)
+            fresh_state, race_on_state, _ = telem.snapshot() if telem else (False, False, 0.0)
+            if state is not None and state.get("name") == "results" and visual_results_at is None:
+                visual_results_at = time.time()
+                visual_results_delay_logged = False
+                if fresh_state and race_on_state:
+                    log("[results] visual detected while telemetry race_on=true.")
+            if visual_results_at is not None and fresh_state and not race_on_state and not visual_results_delay_logged:
+                log(f"[timing] visual_results_to_race_off: {time.time() - visual_results_at:.2f}s")
+                visual_results_delay_logged = True
+            if fresh_state and race_on_state and state is not None:
+                name = state.get("name")
+                if name in ("prerace_menu", "settings_menu"):
+                    if ignored_racing_state != name:
+                        log(f"[{name}] ignored while telemetry race_on=true.")
+                        ignored_racing_state = name
+                    state = None
+                else:
+                    ignored_racing_state = None
+            elif not (fresh_state and race_on_state):
+                ignored_racing_state = None
 
             # Guard 2: "guard" screen (pause menu / dashboard).
             if state is not None and state.get("guard", False):
-                rk = state.get("resume_key")
-                # Auto-resume: tap the resume key (esc/B) to close the menu and
-                # resume the race, retrying up to menu_resume_tries (the first tap
-                # often misses right after an alt-tab while focus is settling).
-                # Re-detection each loop stops as soon as the menu is gone; the
-                # cap bounds damage if it's actually a stuck dashboard.
-                if rk and menu_resumes < menu_resume_tries:
-                    log(f"Pause menu detected -> '{rk}' to resume ({menu_resumes + 1}/{menu_resume_tries}).")
-                    backend.tap(rk)
-                    menu_resumes += 1
-                    status("paused")
-                    _sleep(1.2, stop)
+                now = time.time()
+                if cfg.get("automation_preset") == "fast" and state.get("name") == "settings_menu":
+                    if now < await_confirm_until:
+                        _sleep(loop_poll, stop)
+                        continue
+                    if now < relaunch_drive_until:
+                        state = None
+                    else:
+                        await_confirm_until = 0.0
+                        relaunch_drive_until = 0.0
+                if state is None:
+                    pass
+                else:
+                    rk = state.get("resume_key")
+                    # Auto-resume: tap the resume key (esc/B) to close the menu and
+                    # resume the race, retrying up to menu_resume_tries (the first tap
+                    # often misses right after an alt-tab while focus is settling).
+                    # Re-detection each loop stops as soon as the menu is gone; the
+                    # cap bounds damage if it's actually a stuck dashboard.
+                    if rk and menu_resumes < menu_resume_tries:
+                        log(f"Pause menu detected -> '{rk}' to resume ({menu_resumes + 1}/{menu_resume_tries}).")
+                        backend.tap(rk)
+                        menu_resumes += 1
+                        status("paused")
+                        _sleep(1.2, stop)
+                        continue
+                    enter_pause(f"'{state['name']}' menu")
+                    _sleep(loop_poll, stop)
                     continue
-                enter_pause(f"'{state['name']}' menu")
-                _sleep(loop_poll, stop)
-                continue
 
             if paused:
                 log("Resumed.")
@@ -380,20 +575,40 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 backend.release_steer()
                 menu_keys = selected_menu_keys(state, rect)
                 if menu_keys is None:
-                    log(f"[{state['name']}] selected menu row not detected; waiting.")
-                    _sleep(loop_poll, stop)
-                    continue
+                    fallback = state.get("selected_menu_fallback_keys")
+                    if fallback is None:
+                        log(f"[{state['name']}] selected menu row not detected; waiting.")
+                        _sleep(loop_poll, stop)
+                        continue
+                    log(f"[{state['name']}] selected menu row not detected; fallback keys.")
+                    menu_keys = fallback
                 steps = menu_keys + state.get("keys", [])
                 keys = [k["key"] for k in steps]
+                spam = state.get("spam")
+                if spam:
+                    keys.append(f"{spam.get('key', '?')}*{spam.get('count', 1)}")
                 log(f"[{state['name']}] -> {keys}")
                 status(state["name"])
-                for step in steps:
-                    backend.tap(step["key"])
-                    _sleep(_duration(step.get("wait"), 0.5), stop)
+                execute_steps(steps)
+                if cfg.get("automation_preset") == "fast" and state["name"] == "results":
+                    _, spam_changed = execute_results_combo(spam, rect)
+                    post_race_skip_sent = True
+                else:
+                    _, spam_changed = execute_spam(spam, state["name"], rect)
+                if cfg.get("automation_preset") == "fast" and spam_changed:
+                    now = time.time()
+                    if state["name"] == "results":
+                        await_confirm_until = now + _duration(cfg.get("await_confirm_s"), 3.0, 0.0)
+                    elif state["name"] == "restart_confirm":
+                        await_confirm_until = 0.0
+                        relaunch_drive_until = now + _duration(cfg.get("relaunch_drive_s"), 8.0, 0.0)
+                        backend.hold_accelerate()
                 # 1 lap counts only on the state marked count_lap (Start Race Event),
                 # not on Restart Event -> avoids double counting per loop.
                 if state.get("count_lap", False):
                     cycles += 1
+                    await_confirm_until = 0.0
+                    relaunch_drive_until = 0.0
                     status(state["name"])
                     if max_cycles and cycles >= max_cycles:
                         log(f"Max laps reached ({cycles}). Clean stop.")
@@ -401,6 +616,10 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 # Hold the accelerator during loading + 3-2-1-GO countdown
                 # -> the car launches right at GO (instead of staying still).
                 post_wait = _duration(state.get("post_wait_s", cfg.get("post_restart_wait_s")), 8.0)
+                if spam_changed:
+                    reset_stuck()
+                    continue
+                wait_until_change = bool(state.get("wait_until_state_change", False))
                 if state.get("hold_during_wait", False):
                     if steer:
                         backend.hold_steer()
@@ -411,9 +630,18 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                         drive_wait(post_wait - ease)
                     else:
                         backend.hold_accelerate()
-                        drive_wait(post_wait)
+                        if wait_until_change:
+                            if cfg.get("automation_preset") == "fast":
+                                wait_until_launch_signal(state["name"], rect, post_wait)
+                            else:
+                                wait_until_state_change(state["name"], rect, post_wait)
+                        else:
+                            drive_wait(post_wait)
                 else:
-                    _sleep(post_wait, stop)
+                    if wait_until_change:
+                        wait_until_state_change(state["name"], rect, post_wait)
+                    else:
+                        _sleep(post_wait, stop)
                 reset_stuck()  # fresh launch -> reset stuck/modulation timers
                 continue
 
@@ -421,6 +649,14 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
             if steer:
                 backend.hold_steer()
             status("racing")
+            fresh_race, race_on_now, _speed_now = telem.snapshot() if telem else (False, False, 0.0)
+            if fresh_race and race_on_now:
+                race_seen = True
+                post_race_skip_sent = False
+                await_confirm_until = 0.0
+                relaunch_drive_until = 0.0
+                visual_results_at = None
+                visual_results_delay_logged = False
 
             # Stuck/collision detection: the car hit a vehicle/wall -> rewind (or
             # back up and steer). With telemetry we know real speed, so a jump or
@@ -428,7 +664,7 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
             # fall back to "the sampled scene stopped changing".
             if recovery:
                 now = time.time()
-                fresh, race_on, speed_kmh = telem.snapshot() if telem else (False, False, 0.0)
+                fresh, race_on, speed_kmh = (fresh_race, race_on_now, _speed_now) if telem else (False, False, 0.0)
                 if fresh:
                     if (not race_on) or speed_kmh > stuck_speed:
                         stuck_since = now  # moving (incl. airborne/off-road) or not racing
@@ -460,6 +696,8 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 last_lift = time.time()
 
             maybe_shift_up()
+            if maybe_fast_post_race_skip(rect):
+                continue
 
             _sleep(loop_poll, stop)
     except KeyboardInterrupt:

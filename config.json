@@ -31,6 +31,9 @@
   "launch_ease": false,
   "launch_ease_s": 4.0,
   "automation_preset": "slowed",
+  "fast_post_race_skip": false,
+  "keyboard_tap_hold_s": 0.06,
+  "gamepad_tap_hold_s": 0.08,
   "manual_shift_assist": true,
   "shift_up_key": "e",
   "gamepad_shift_up_key": "b",
@@ -81,6 +84,7 @@
     },
     {
       "name": "results",
+      "priority": 10,
       "match_mode": "all",
       "keys": [
         {
@@ -89,6 +93,7 @@
         }
       ],
       "post_wait_s": 1.0,
+      "wait_until_state_change": false,
       "band": {
         "y": 0.227,
         "x0": 0.25,
@@ -105,6 +110,7 @@
     },
     {
       "name": "restart_confirm",
+      "priority": 30,
       "hold_during_wait": true,
       "match_mode": "all",
       "selected_menu": {
@@ -136,6 +142,7 @@
         }
       ],
       "post_wait_s": 8.0,
+      "wait_until_state_change": false,
       "band": {
         "y": 0.39,
         "x0": 0.28,
@@ -152,6 +159,7 @@
     },
     {
       "name": "settings_menu",
+      "priority": 20,
       "guard": true,
       "resume_key": "esc",
       "match_mode": "all",
@@ -171,6 +179,7 @@
     },
     {
       "name": "prerace_menu",
+      "priority": 10,
       "count_lap": true,
       "hold_during_wait": true,
       "match_mode": "any",
@@ -227,6 +236,7 @@
         }
       ],
       "post_wait_s": 8.0,
+      "wait_until_state_change": false,
       "pixels": [
         {
           "x": 0.133,

@@ -11,7 +11,7 @@ const els = {
   elapsedTime: $("elapsedTime"),
   accelKey: $("accelKey"), steerKey: $("steerKey"), startDelay: $("startDelay"),
   pollInterval: $("pollInterval"), maxLaps: $("maxLaps"), throttleMod: $("throttleMod"), launchEase: $("launchEase"),
-  saveBtn: $("saveBtn"), runBtn: $("runBtn"), pauseBtn: $("pauseBtn"), log: $("log"), clearLog: $("clearLog"),
+  saveBtn: $("saveBtn"), runBtn: $("runBtn"), pauseBtn: $("pauseBtn"), log: $("log"), clearLog: $("clearLog"), toggleLog: $("toggleLog"),
   modeSeg: $("modeSeg"), presetSeg: $("presetSeg"), modeHint: $("modeHint"), accelLabel: $("accelLabel"),
   steerField: $("steerField"), conn: $("conn"),
   gamePod: $("gamePod"), gameText: $("gameText"),
@@ -35,6 +35,13 @@ let manualPaused = false;
 let gamepadAvailable = true;
 let elapsedS = 0;
 let elapsedTimer = null;
+let logVisible = localStorage.getItem("cruise.logVisible") !== "false";
+
+function applyLogVisibility() {
+  document.body.classList.toggle("log-hidden", !logVisible);
+  if (els.toggleLog) els.toggleLog.textContent = logVisible ? "HIDE LOG" : "SHOW LOG";
+  localStorage.setItem("cruise.logVisible", logVisible ? "true" : "false");
+}
 
 function updatePauseBtn() {
   els.pauseBtn.disabled = !running;
@@ -286,6 +293,10 @@ els.advToggle.addEventListener("click", () => {
   els.advToggle.setAttribute("aria-expanded", open ? "true" : "false");
 });
 els.clearLog.addEventListener("click", () => (els.log.innerHTML = ""));
+els.toggleLog.addEventListener("click", () => {
+  logVisible = !logVisible;
+  applyLogVisibility();
+});
 els.telSaveBtn.addEventListener("click", () => saveTelemetry().catch((e) => logLine(e.message, "l-err")));
 els.rpSaveBtn.addEventListener("click", () => saveDiscord().catch((e) => logLine(e.message, "l-err")));
 // section tabs (SKILL POINTS / TELEMETRY) — TELEMETRY is a full screen that
@@ -381,6 +392,7 @@ async function pollTelemetry() {
 }
 
 (async () => {
+  applyLogVisibility();
   await checkGamepad();  // dispo ViGEmBus -> active/grise le bouton GAMEPAD
   await loadConfig();    // applyMode respecte la disponibilite
 })();

@@ -20,6 +20,7 @@ os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", _OBS_FLAGS)
 import socket
 import threading
 import time
+import webbrowser
 
 import webview
 
@@ -78,6 +79,7 @@ def _wait_for_server(timeout: float = 12.0) -> bool:
 
 def main() -> None:
     if server.already_running():
+        webbrowser.open(f"http://{server.HOST}:{server.PORT}")
         return  # single instance: a Cruise window is already open
     threading.Thread(target=_run_server, daemon=True).start()
     _wait_for_server()

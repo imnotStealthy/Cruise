@@ -373,7 +373,8 @@ body::after {
 .failsafe { margin-top: 14px; font-size: 9px; letter-spacing: 0.5px; color: #444; text-align: center; text-transform: uppercase; }
 
 /* Telemetry Log ---------------------------------------------------------- */
-.tel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.tel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.tel-actions { display: flex; align-items: center; gap: 8px; }
 .tel-state {
   font-family: "JetBrains Mono", monospace; font-size: 9px; letter-spacing: 1px;
   padding: 3px 9px; border-radius: 4px; border: 1px solid var(--panel-edge); color: #777;
@@ -567,8 +568,16 @@ body::after {
    d'une hauteur fixe -> les 2 colonnes tiennent dans la fenetre sans scroll. */
 #view-controller .grid { height: 100%; min-height: 0; }
 #view-controller .card { min-height: 0; overflow: hidden; }
+#view-controller .card.control {
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 #view-controller .card.telemetry { display: flex; flex-direction: column; }
 #view-controller .log { flex: 1 1 auto; height: auto; min-height: 60px; }
+
+body.log-hidden #view-controller .grid { grid-template-columns: minmax(0, 1fr); }
+body.log-hidden #view-controller .card.telemetry { display: none; }
+body.log-hidden #view-controller .card.control { max-width: 620px; width: 100%; margin: 0 auto; }
 
 /* Compaction (uniquement Controller) pour fit strict en 16:9 par defaut. */
 #view-controller .card { padding: 14px 16px; }
