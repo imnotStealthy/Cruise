@@ -3,6 +3,22 @@
 All notable changes to Cruise are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] - 2026-06-08
+
+### Added
+- **Single-instance guard** — launching Cruise again now redirects to the existing
+  local UI instead of starting a second bot process.
+- **Telemetry log visibility** — the controller view can hide/show the telemetry
+  log, and the Control card can scroll in smaller windows.
+
+### Fixed
+- FAST result handling now starts from visual results detection instead of waiting
+  for delayed `race_off` telemetry.
+- Restart confirmation uses bounded fast retries and stops as soon as the visual
+  state changes.
+- Menu-like visual detections are ignored while telemetry says the race is active,
+  preventing accidental menu `Enter` inputs during a run.
+
 ## [1.2.1] - 2026-06-06
 
 ### Added
