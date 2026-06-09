@@ -43,6 +43,9 @@
   "shift_min_speed_kmh": 8.0,
   "loop_poll_s": 1.0,
   "start_delay_s": 0.0,
+  "vision_debug": false,
+  "vision_debug_dir": "tools/debug_frames",
+  "race_off_confirm_s": 0.3,
   "states": [
     {
       "name": "menu",

@@ -3,6 +3,26 @@
 All notable changes to Cruise are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.3] - 2026-06-09
+
+### Added
+- **Vision resolver debug** — optional confidence logs and near-miss frame capture
+  for tuning visual state detection.
+- **Local API CSRF protection** — per-process session token required on every
+  POST request.
+
+### Fixed
+- FAST result and restart confirmation detection now uses one frame capture per
+  poll instead of many `GetPixel` calls, cutting visual re-detection latency.
+- Restart confirmation timing logs now expose result-to-confirm and
+  confirm-to-prerace delays.
+- Telemetry sanity checks reject malformed local UDP packets and debounce
+  telemetry-only post-race skips.
+- Launching a second Cruise desktop instance now attaches a native window to the
+  existing server without stopping the owner process.
+- Vision debug captures are confined to safe folders and pruned to a bounded
+  retention set.
+
 ## [1.2.2] - 2026-06-08
 
 ### Added

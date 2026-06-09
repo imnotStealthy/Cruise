@@ -67,20 +67,29 @@ def resolve(coord: float, size: int) -> int:
     return int(coord * size) if 0.0 < coord <= 1.0 else int(coord)
 
 
-def pixel_matches(p: dict, rect: tuple[int, int, int, int]) -> bool:
+def pixel_score(p: dict, rect: tuple[int, int, int, int]) -> tuple[bool, float]:
+    """(passed, confidence). Confidence is 1.0 at the exact colour and decays to
+    0.0 at 2x tolerance -> near-misses are visible in debug logs instead of an
+    opaque boolean."""
     ox, oy, w, h = rect
     got = screen.pixel(ox + resolve(p["x"], w), oy + resolve(p["y"], h))
-    tol = p.get("tol", 20)
+    tol = max(1, int(p.get("tol", 20)))
     rgb = p["rgb"]
-    return all(abs(got[k] - rgb[k]) <= tol for k in range(3))
+    delta = max(abs(got[k] - rgb[k]) for k in range(3))
+    return delta <= tol, max(0.0, 1.0 - delta / (2.0 * tol))
 
 
-def band_matches(band: dict, rect: tuple[int, int, int, int]) -> bool:
-    """True if a horizontal line at band["y"] contains >= min_hits pixels of the
-    target color across [x0, x1]. Robust to text/numbers/edges overlaid on the
-    bar and to layout shifts (counts the colour, not exact points) — unlike a few
-    fixed points where one landing on text (e.g. the FH6 results lime header)
-    breaks an all-match."""
+def pixel_matches(p: dict, rect: tuple[int, int, int, int]) -> bool:
+    return pixel_score(p, rect)[0]
+
+
+def band_score(band: dict, rect: tuple[int, int, int, int]) -> tuple[bool, float]:
+    """(passed, confidence) for a horizontal colour band at band["y"]: passed when
+    >= min_hits sampled pixels across [x0, x1] match the target colour. Robust to
+    text/numbers/edges overlaid on the bar and to layout shifts (counts the
+    colour, not exact points) — unlike a few fixed points where one landing on
+    text (e.g. the FH6 results lime header) breaks an all-match. Confidence is
+    hits/min_hits capped at 1.0."""
     ox, oy, w, h = rect
     y = oy + resolve(band["y"], h)
     x0 = ox + resolve(band["x0"], w)
@@ -93,16 +102,37 @@ def band_matches(band: dict, rect: tuple[int, int, int, int]) -> bool:
         all(abs(screen.pixel(x, y)[k] - rgb[k]) <= tol for k in range(3))
         for x in range(x0, x1, step)
     )
-    return hits >= int(band.get("min_hits", 20))
+    need = max(1, int(band.get("min_hits", 20)))
+    return hits >= need, min(1.0, hits / need)
+
+
+def band_matches(band: dict, rect: tuple[int, int, int, int]) -> bool:
+    return band_score(band, rect)[0]
+
+
+def state_score(state: dict, rect: tuple[int, int, int, int]) -> tuple[bool, float, str]:
+    """(passed, confidence, detail) for one state. match_mode "all": every check
+    must pass, confidence/detail come from the weakest check (the one that breaks
+    first). "any": the strongest check decides."""
+    checks: list[tuple[bool, float, str]] = []
+    for p in state.get("pixels", []):
+        ok, conf = pixel_score(p, rect)
+        checks.append((ok, conf, f"pixel({p['x']},{p['y']})"))
+    if "band" in state:
+        ok, conf = band_score(state["band"], rect)
+        checks.append((ok, conf, f"band(y={state['band']['y']})"))
+    if not checks:
+        return False, 0.0, "no checks"
+    if state.get("match_mode", "all") == "all":
+        passed = all(c[0] for c in checks)
+        weakest = min(checks, key=lambda c: c[1])
+        return passed, weakest[1], weakest[2]
+    best = max(checks, key=lambda c: c[1])
+    return best[0], best[1], best[2]
 
 
 def state_active(state: dict, rect: tuple[int, int, int, int]) -> bool:
-    checks = [pixel_matches(p, rect) for p in state.get("pixels", [])]
-    if "band" in state:
-        checks.append(band_matches(state["band"], rect))
-    if not checks:
-        return False
-    return all(checks) if state.get("match_mode", "all") == "all" else any(checks)
+    return state_score(state, rect)[0]
 
 
 def selected_menu_keys(state: dict, rect: tuple[int, int, int, int]) -> list[dict] | None:
@@ -126,15 +156,101 @@ def selected_menu_keys(state: dict, rect: tuple[int, int, int, int]) -> list[dic
     return None if menu.get("required", True) else []
 
 
-def detect_state(cfg: dict, rect: tuple[int, int, int, int] | None = None) -> dict | None:
+def detect_state(cfg: dict, rect: tuple[int, int, int, int] | None = None, debug=None) -> dict | None:
+    """Deterministic resolver: score every state, keep the passing ones, pick the
+    winner by (priority desc, confidence desc) — overlapping states (the restart
+    popup over the results screen) resolve by explicit priority, equal priorities
+    by confidence. `debug` (VisionDebug) logs scores/decisions and saves frames."""
     if rect is None:
         rect = detection_rect(cfg)
-    states = sorted(cfg["states"], key=lambda s: int(s.get("priority", 0)), reverse=True)
-    with screen.dc_session():  # a single screen DC for all pixels in the poll
-        for state in states:
-            if state_active(state, rect):
-                return state
-    return None
+    scored: list[tuple[dict, bool, float, str]] = []
+    with screen.frame_session(rect):  # one BitBlt for all samples in the poll
+        for state in cfg["states"]:
+            passed, conf, detail = state_score(state, rect)
+            scored.append((state, passed, conf, detail))
+    active = [c for c in scored if c[1]]
+    winner = max(active, key=lambda c: (int(c[0].get("priority", 0)), c[2]))[0] if active else None
+    if debug is not None:
+        debug.observe(scored, winner, rect)
+    return winner
+
+
+class VisionDebug:
+    """Opt-in visual debug (config "vision_debug": true): logs the resolver
+    decision with its confidence on every change, and on near-misses (best
+    candidate scored >= NEAR but did not pass) logs the rejection reason and
+    saves the capture to vision_debug_dir (default tools/debug_frames).
+    Throttled (one frame per SAVE_EVERY_S, MAX_FRAMES total) so the 100 Hz FAST
+    poll cannot flood the log or the disk."""
+
+    NEAR = 0.5
+    SAVE_EVERY_S = 2.0
+    MAX_FRAMES = 200       # per run
+    KEEP_ON_DISK = 300     # retention: oldest PNGs beyond this are pruned
+
+    def __init__(self, cfg: dict, log) -> None:
+        self.enabled = bool(cfg.get("vision_debug", False))
+        self.log = log
+        self.dir = self._safe_dir(str(cfg.get("vision_debug_dir", "tools/debug_frames")))
+        self._last_name: str | None = "__boot__"
+        self._last_save = 0.0
+        self._saved = 0
+
+    @staticmethod
+    def _safe_dir(raw: str) -> Path:
+        """Confine the debug dir to the app dir or ~/.cruise: screenshots contain
+        the whole screen (overlays, notifications), so a config value must not be
+        able to scatter them anywhere on disk."""
+        path = Path(raw)
+        try:
+            target = (path if path.is_absolute() else _BASE / path).resolve()
+            for root in (_BASE.resolve(), DATA_DIR.resolve()):
+                if target == root or root in target.parents:
+                    return target
+        except OSError:
+            pass
+        return DATA_DIR / "debug_frames"
+
+    def _prune(self) -> None:
+        try:
+            frames = sorted(self.dir.glob("*.png"), key=lambda p: p.stat().st_mtime)
+            for old in frames[:-self.KEEP_ON_DISK]:
+                old.unlink()
+        except OSError:
+            pass
+
+    def observe(self, scored, winner, rect) -> None:
+        if not self.enabled:
+            return
+        name = winner.get("name") if winner else None
+        if name != self._last_name:
+            self._last_name = name
+            if winner is not None:
+                _, _, conf, detail = next(c for c in scored if c[0] is winner)
+                self.log(f"[vision] state={name} conf={conf:.2f} via {detail}")
+        if winner is not None:
+            return
+        near = [c for c in scored if not c[1] and c[2] >= self.NEAR]
+        if not near:
+            return
+        best = max(near, key=lambda c: c[2])
+        now = time.time()
+        if now - self._last_save < self.SAVE_EVERY_S or self._saved >= self.MAX_FRAMES:
+            return
+        self.log(
+            f"[vision] state=none; near-miss {best[0].get('name')} "
+            f"conf={best[2]:.2f} rejected by {best[3]}"
+        )
+        try:
+            self.dir.mkdir(parents=True, exist_ok=True)
+            path = self.dir / f"{time.strftime('%Y%m%d_%H%M%S')}_{best[0].get('name')}.png"
+            screen.save_png(str(path), rect)
+            self._prune()
+            self._last_save = now
+            self._saved += 1
+            self.log(f"[vision] frame saved -> {path}")
+        except OSError as e:
+            self.log(f"[vision] frame save failed: {e}")
 
 
 def _sleep(duration: float, stop) -> None:
@@ -254,11 +370,24 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
     last_recover = 0.0
     race_seen = False
     post_race_skip_sent = False
+    race_off_since = None
+    # One spoofed/glitched race_on=false packet must not fire the blind post-race
+    # x-spam mid-race: require race_off to hold for this long first. The visual
+    # results path stays primary and is unaffected.
+    race_off_confirm = _duration(cfg.get("race_off_confirm_s"), 0.3, 0.0)
     await_confirm_until = 0.0
     relaunch_drive_until = 0.0
     ignored_racing_state = None
+    race_on_confirm = None
     visual_results_at = None
     visual_results_delay_logged = False
+    first_x_at = None          # first results 'x' -> [timing] x_to_restart_confirm
+    confirm_detected_at = None  # popup seen -> [timing] restart_confirm_* logs
+
+    vision_dbg = VisionDebug(cfg, log)
+    if vision_dbg.enabled:
+        log(f"Vision debug: ON -> {vision_dbg.dir}")
+        log("Vision debug captures gameplay screenshots; disable before release.")
 
     # Optional throttle modulation: brief periodic throttle lift so the in-game
     # braking assist / engine braking slows the car for corners (off by default).
@@ -423,18 +552,26 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
         end = time.time() + timeout_s
         keys = []
         changed = False
+        def left_results() -> bool:
+            # Any state other than "results" (incl. restart_confirm, prerace_menu,
+            # none) ends the combo: the popup is handed to its own handler so the
+            # selected-row normalization picks Yes (a blind Enter here could hit No).
+            current = detect_state(cfg, rect)
+            return current is None or current.get("name") != "results"
+
         while time.time() < end:
             if stop is not None and stop.is_set():
                 break
             backend.tap("x", hold_s)
             keys.append("x")
             _sleep(interval, stop)
+            if left_results():
+                changed = True
+                break
             backend.tap("enter", hold_s)
             keys.append("enter")
             _sleep(interval, stop)
-            current = detect_state(cfg, rect)
-            current_name = current.get("name") if current else None
-            if current_name not in ("results", "restart_confirm"):
+            if left_results():
                 changed = True
                 break
         if not changed and spam.get("fallback_keys"):
@@ -444,7 +581,7 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
         return keys, changed
 
     def maybe_fast_post_race_skip(rect: tuple[int, int, int, int]) -> bool:
-        nonlocal race_seen, post_race_skip_sent
+        nonlocal race_seen, post_race_skip_sent, race_off_since
         if not (cfg.get("automation_preset") == "fast" and cfg.get("fast_post_race_skip", True) and telem):
             return False
         fresh, race_on, _speed_kmh = telem.snapshot()
@@ -453,8 +590,15 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
         if race_on:
             race_seen = True
             post_race_skip_sent = False
+            race_off_since = None
             return False
         if not race_seen or post_race_skip_sent:
+            return False
+        now = time.time()
+        if race_off_since is None:
+            race_off_since = now
+            return False
+        if now - race_off_since < race_off_confirm:
             return False
         backend.release_accelerate()
         backend.release_steer()
@@ -510,7 +654,7 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 continue
 
             rect = win[3] if win else detection_rect(cfg)
-            state = detect_state(cfg, rect)
+            state = detect_state(cfg, rect, vision_dbg)
             fresh_state, race_on_state, _ = telem.snapshot() if telem else (False, False, 0.0)
             if state is not None and state.get("name") == "results" and visual_results_at is None:
                 visual_results_at = time.time()
@@ -529,8 +673,15 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                     state = None
                 else:
                     ignored_racing_state = None
+                    # While race_on=true, results/restart_confirm must be seen on
+                    # 2 consecutive polls before any menu key is sent -> one stray
+                    # frame matching the lime band can't fire x/enter mid-race.
+                    if name in ("results", "restart_confirm") and race_on_confirm != name:
+                        race_on_confirm = name
+                        state = None
             elif not (fresh_state and race_on_state):
                 ignored_racing_state = None
+                race_on_confirm = None
 
             # Guard 2: "guard" screen (pause menu / dashboard).
             if state is not None and state.get("guard", False):
@@ -573,6 +724,19 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 reset_stuck()  # menus/results/countdown are not "racing"
                 backend.release_accelerate()
                 backend.release_steer()
+                handler_t0 = time.time()
+                if state["name"] == "results" and visual_results_at is not None and first_x_at is None:
+                    log(f"[timing] results_detected_to_x: {handler_t0 - visual_results_at:.2f}s")
+                    first_x_at = handler_t0  # 'x' goes out right below (steps/combo)
+                elif state["name"] == "restart_confirm":
+                    if first_x_at is not None:
+                        log(f"[timing] x_to_restart_confirm: {handler_t0 - first_x_at:.2f}s")
+                        first_x_at = None
+                    if confirm_detected_at is None:
+                        confirm_detected_at = handler_t0
+                elif state["name"] == "prerace_menu" and confirm_detected_at is not None:
+                    log(f"[timing] restart_confirm_to_prerace: {handler_t0 - confirm_detected_at:.2f}s")
+                    confirm_detected_at = None
                 menu_keys = selected_menu_keys(state, rect)
                 if menu_keys is None:
                     fallback = state.get("selected_menu_fallback_keys")
@@ -590,6 +754,9 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 log(f"[{state['name']}] -> {keys}")
                 status(state["name"])
                 execute_steps(steps)
+                if state["name"] == "restart_confirm" and confirm_detected_at is not None and state.get("spam"):
+                    # fast preset: the first Enter is the next tap of the spam below
+                    log(f"[timing] restart_confirm_detected_to_enter: {time.time() - confirm_detected_at:.2f}s")
                 if cfg.get("automation_preset") == "fast" and state["name"] == "results":
                     _, spam_changed = execute_results_combo(spam, rect)
                     post_race_skip_sent = True
@@ -655,8 +822,11 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 post_race_skip_sent = False
                 await_confirm_until = 0.0
                 relaunch_drive_until = 0.0
+                race_on_confirm = None
                 visual_results_at = None
                 visual_results_delay_logged = False
+                first_x_at = None
+                confirm_detected_at = None
 
             # Stuck/collision detection: the car hit a vehicle/wall -> rewind (or
             # back up and steer). With telemetry we know real speed, so a jump or

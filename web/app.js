@@ -1,5 +1,29 @@
 const $ = (id) => document.getElementById(id);
+
+// Anti-CSRF: per-process token fetched once, echoed on every POST. An external
+// site cannot read /api/session (same-origin policy), so it cannot forge POSTs.
+let csrfToken = null;
+async function ensureToken() {
+  if (!csrfToken) {
+    const r = await fetch("/api/session");
+    csrfToken = (await r.json()).token;
+  }
+  return csrfToken;
+}
+
 async function api(path, opts) {
+  if (opts && opts.method === "POST") {
+    opts.headers = Object.assign({}, opts.headers, { "X-Cruise-Token": await ensureToken() });
+    let r = await fetch(path, opts);
+    if (r.status === 403) {  // server restarted -> token rotated; refresh once
+      csrfToken = null;
+      opts.headers["X-Cruise-Token"] = await ensureToken();
+      r = await fetch(path, opts);
+    }
+    const body = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);
+    return body;
+  }
   const r = await fetch(path, opts);
   const body = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(body.detail || `HTTP ${r.status}`);

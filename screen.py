@@ -130,6 +130,33 @@ def grab_white(rect: tuple[int, int, int, int], min_v: int = 200, sat_tol: int =
     return (w, h, mask)
 
 
+def save_png(path: str, rect: tuple[int, int, int, int]) -> None:
+    """Write a capture of rect to `path` as PNG (stdlib zlib/struct only, no
+    Pillow). Used by the vision debug mode to keep missed/near-miss frames."""
+    import struct
+    import zlib
+    w, h, buf = grab_bgra(rect)
+    if w == 0:
+        return
+    # BGRA -> RGBA via slice swap (C-speed): a per-pixel Python loop on a full
+    # frame takes seconds and would stall the bot loop on each debug save.
+    data = bytearray(buf)
+    data[0::4], data[2::4] = data[2::4], data[0::4]
+    stride = w * 4
+    raw = bytearray()
+    for yy in range(h):
+        raw.append(0)  # PNG filter: none
+        raw += data[yy * stride:(yy + 1) * stride]
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0)  # 8-bit RGBA
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(bytes(raw), 1)) + chunk(b"IEND", b"")
+    with open(path, "wb") as f:
+        f.write(png)
+
+
 class FailSafeException(Exception):
     """Mouse moved into a screen corner -> emergency stop (like pyautogui)."""
 
@@ -142,6 +169,26 @@ def size() -> tuple[int, int]:
 # costly (~9 GetDC/poll with 3 states x 3 pixels). dc_session() opens a single
 # one, reused by pixel() for the duration of the block.
 _session_dc = None
+
+# Shared frame for a poll: under DWM each GetPixel forces a composition
+# readback (~4 ms/pixel measured) -> scoring every state (~185 samples) costs
+# ~1 s. frame_session() BitBlts the detection rect ONCE (~16 ms at 1080p);
+# pixel() then reads from the in-memory buffer for the duration of the block.
+_frame = None
+
+
+@contextlib.contextmanager
+def frame_session(rect: tuple[int, int, int, int]):
+    """Capture rect once; pixel() calls inside the block read from the frame
+    buffer (points outside the rect fall back to GetPixel)."""
+    global _frame
+    x, y = int(rect[0]), int(rect[1])
+    w, h, buf = grab_bgra(rect)
+    _frame = (x, y, w, h, buf) if buf is not None else None
+    try:
+        yield
+    finally:
+        _frame = None
 
 
 @contextlib.contextmanager
@@ -158,6 +205,12 @@ def dc_session():
 
 
 def pixel(x: int, y: int) -> tuple[int, int, int]:
+    if _frame is not None:
+        fx, fy, fw, fh, buf = _frame
+        ix, iy = int(x) - fx, int(y) - fy
+        if 0 <= ix < fw and 0 <= iy < fh:
+            i = (iy * fw + ix) * 4
+            return (buf[i + 2], buf[i + 1], buf[i])
     hdc = _session_dc or _user32.GetDC(0)
     if not hdc:
         return (0, 0, 0)
@@ -178,7 +231,7 @@ def motion_signature(rect: tuple[int, int, int, int], points) -> tuple[int, ...]
     a stuck car (against a wall/vehicle) yields a near-constant signature, while
     driving constantly changes road/scenery pixels."""
     ox, oy, w, h = rect
-    with dc_session():
+    with frame_session(rect):  # one BitBlt beats 12 GetPixel (~4 ms each)
         return tuple(sum(pixel(ox + int(fx * w), oy + int(fy * h))) for fx, fy in points)
 
 

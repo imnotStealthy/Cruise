@@ -14,6 +14,7 @@ format (Motorsport + Horizon), so it is robust to FH dash-packet differences:
 """
 from __future__ import annotations
 
+import math
 import socket
 import struct
 import threading
@@ -78,10 +79,19 @@ class Telemetry:
                 gear = data[319] if n >= 320 else None
                 if n >= 260:  # Dash speed (m/s) is more accurate than |velocity|
                     dash_speed = struct.unpack_from("<f", data, 256)[0]
-                    if dash_speed > 0.0:
+                    if math.isfinite(dash_speed) and 0.0 < dash_speed <= 200.0:
                         speed_ms = dash_speed
             except struct.error:
                 continue
+            # Sanity guards: anything local can send to udp/127.0.0.1, so a
+            # malformed or spoofed packet must not inject absurd physics.
+            if not all(math.isfinite(v) for v in (speed_ms, max_rpm, current_rpm)):
+                continue
+            if speed_ms < 0.0 or speed_ms > 200.0:  # > 720 km/h: garbage
+                continue
+            if not (0.0 <= current_rpm <= 50000.0 and 0.0 < max_rpm <= 50000.0):
+                max_rpm = 0.0      # consumers gate rpm logic on max_rpm > 0
+                current_rpm = 0.0
             with self._lock:
                 self._race_on = bool(race_on)
                 self._speed_ms = speed_ms

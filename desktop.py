@@ -20,7 +20,6 @@ os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", _OBS_FLAGS)
 import socket
 import threading
 import time
-import webbrowser
 
 import webview
 
@@ -78,11 +77,14 @@ def _wait_for_server(timeout: float = 12.0) -> bool:
 
 
 def main() -> None:
-    if server.already_running():
-        webbrowser.open(f"http://{server.HOST}:{server.PORT}")
-        return  # single instance: a Cruise window is already open
-    threading.Thread(target=_run_server, daemon=True).start()
-    _wait_for_server()
+    # Single instance: the first process owns the mutex and runs the server.
+    # A second launch still opens a NATIVE window (not a browser tab) attached
+    # to the already-running server.
+    owns_server = not server.already_running()
+    if owns_server:
+        threading.Thread(target=_run_server, daemon=True).start()
+    if not _wait_for_server():
+        return  # mutex held but no server answering: nothing to attach to
 
     window = webview.create_window(
         "Cruise",
@@ -102,7 +104,8 @@ def main() -> None:
         except Exception:
             pass
 
-    window.events.closing += _on_closing
+    if owns_server:  # a viewer window must not stop the owner's bot/gamepad
+        window.events.closing += _on_closing
     webview.start()
 
 

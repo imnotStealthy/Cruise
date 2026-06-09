@@ -10,9 +10,11 @@ ThreadingHTTPServer is enough and avoids bundling pydantic/starlette/uvicorn
 from __future__ import annotations
 
 import ctypes
+import hmac
 import json
 import os
 import queue
+import secrets
 import subprocess
 import sys
 import threading
@@ -39,6 +41,13 @@ _MEI = Path(getattr(sys, "_MEIPASS", _BASE))
 WEB_DIR = (_MEI / "web") if (_MEI / "web").exists() else (_BASE / "web")
 ALLOWED_ORIGINS = {f"http://{HOST}:{PORT}", f"http://localhost:{PORT}"}
 ALLOWED_HOSTS = {f"{HOST}:{PORT}", f"localhost:{PORT}"}
+
+# Anti-CSRF: random per-process token. The frontend fetches it via /api/session
+# (same-origin only: no CORS headers, so an external page cannot read it) and
+# must echo it in X-Cruise-Token on every POST. A cross-site form/fetch can
+# still SEND a POST to 127.0.0.1 but cannot know the token -> rejected.
+# Never persisted (not in config.json) and never logged.
+_SESSION_TOKEN = secrets.token_hex(32)
 
 _CONTENT_TYPES = {
     ".html": "text/html; charset=utf-8",
@@ -281,6 +290,8 @@ def _apply_config_update(cfg: dict, data: dict) -> dict:
         cfg["telemetry_port"] = _int_range(data["telemetry_port"], "telemetry_port", 1, 65535)
     if "rich_presence_enabled" in data:
         cfg["rich_presence_enabled"] = bool(data["rich_presence_enabled"])
+    if "vision_debug" in data:
+        cfg["vision_debug"] = bool(data["vision_debug"])
     return cfg
 
 
@@ -443,14 +454,24 @@ class Handler(BaseHTTPRequestHandler):
         if host not in ALLOWED_HOSTS:
             raise BadRequest("forbidden host", status=403)
 
-    def _check_local_origin(self) -> None:
+    def _check_local_origin(self, require: bool = False) -> None:
         value = self.headers.get("origin") or self.headers.get("referer")
         if not value:
+            # POSTs must carry an Origin/Referer (browsers always send one on
+            # fetch POST); silently accepting absence would let origin-less
+            # cross-site requests through.
+            if require:
+                raise BadRequest("missing origin", status=403)
             return
         parsed = urlparse(value)
         origin = f"{parsed.scheme}://{parsed.netloc}"
         if origin not in ALLOWED_ORIGINS:
             raise BadRequest("forbidden origin", status=403)
+
+    def _check_token(self) -> None:
+        token = self.headers.get("x-cruise-token") or ""
+        if not hmac.compare_digest(token, _SESSION_TOKEN):
+            raise BadRequest("invalid token", status=403)
 
     def _read_json(self) -> dict:
         try:
@@ -536,6 +557,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_file(WEB_DIR / "index.html")
             elif path.startswith("/static/"):
                 self._static(path[len("/static/"):])
+            elif path == "/api/session":
+                self._send_json({"token": _SESSION_TOKEN})
             elif path == "/api/config":
                 self._send_json(core.load_config())
             elif path == "/api/gamepad-check":
@@ -584,7 +607,8 @@ class Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         try:
             self._check_host()
-            self._check_local_origin()
+            self._check_local_origin(require=True)
+            self._check_token()
             if path == "/api/config":
                 cfg = _apply_config_update(core.load_config(), self._read_json())
                 with core.CONFIG_PATH.open("w", encoding="utf-8") as f:
