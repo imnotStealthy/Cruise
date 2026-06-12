@@ -46,6 +46,30 @@
   "vision_debug": false,
   "vision_debug_dir": "tools/debug_frames",
   "race_off_confirm_s": 0.3,
+  "settings_confirm_polls": 2,
+  "settings_confirm_s": 0.5,
+  "menu_resume_retry_s": 6.0,
+  "pause_menu_resume_delay_s": 5.0,
+  "pause_menu_resume_after_focus_s": 0.25,
+  "pause_menu_confirm_polls": 2,
+  "pause_menu_resume_retry_s": 1.0,
+  "lap_confirm_s": 5.0,
+  "buyer_enabled": false,
+  "buyer_max_purchases": 0,
+  "buyer_reserve_percent": 5.0,
+  "buyer_next_key": "right",
+  "buyer_purchase_key": "space",
+  "buyer_confirm_key": "enter",
+  "buyer_back_key": "esc",
+  "buyer_poll_s": 0.05,
+  "buyer_starting_credits": 0,
+  "buyer_stop_on_ocr_fail": true,
+  "buyer_fallback_price": 0,
+  "buyer_credits_mode": "manual",
+  "buyer_cr_ocr_rect": [0.0, 0.0, 0.30, 0.10],
+  "buyer_mem_module": "ForzaHorizon6.exe",
+  "buyer_mem_offsets": [],
+  "buyer_mem_width": 32,
   "states": [
     {
       "name": "menu",
@@ -177,7 +201,7 @@
         ],
         "tol": 30,
         "samples": 40,
-        "min_hits": 15
+        "min_hits": 30
       }
     },
     {

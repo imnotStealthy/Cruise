@@ -37,6 +37,7 @@ class KeyboardBackend(InputBackend):
                  rewind_key: str = "r", tap_hold_s: float = 0.06) -> None:
         import pydirectinput
         pydirectinput.PAUSE = 0.0
+        pydirectinput.FAILSAFE = False  # Cruise uses its own screen.check_failsafe
         self._pdi = pydirectinput
         self.accel = accel_key
         self.steer = steer_key

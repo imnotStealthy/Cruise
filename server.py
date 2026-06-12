@@ -31,6 +31,7 @@ if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
 import bot as core
+import buyer as buyer_core
 import inputs
 import telemetry
 import discord_presence
@@ -426,6 +427,88 @@ class Bot:
 bot = Bot()
 
 
+class Buyer:
+    """Drives buyer_core.run in a thread. Logs go through the bot's SSE stream;
+    live stats are polled via /api/buyer/status."""
+
+    def __init__(self) -> None:
+        self.stop_event: threading.Event | None = None
+        self.thread: threading.Thread | None = None
+        self.stats: dict = {"running": False, "state": "stopped", "cars_bought": 0}
+
+    @property
+    def running(self) -> bool:
+        return bool(self.thread and self.thread.is_alive())
+
+    def start(self, starting_credits: int, max_purchases: int, reserve_percent: float,
+              credits_mode: str = "manual") -> bool:
+        if self.running:
+            return False
+        cfg = core.load_config()
+        # Use memory ONLY if the user already located the address (LOCATE CR);
+        # otherwise track via OCR price subtraction (no slow background scan).
+        if (starting_credits >= 1 and peeker.mode == "memory" and peeker.seed == starting_credits
+                and peeker.src and peeker.src._cands):
+            cfg["buyer_credits_mode"] = "memory"
+            cfg["buyer_mem_located"] = list(peeker.src._cands)
+        else:
+            cfg["buyer_credits_mode"] = "manual"
+        self.stop_event = threading.Event()
+
+        def work() -> None:
+            try:
+                buyer_core.run(
+                    cfg, starting_credits=starting_credits, max_purchases=max_purchases,
+                    reserve_percent=reserve_percent, stop=self.stop_event,
+                    on_log=bot.on_log, on_status=self.stats.update,
+                )
+            except Exception as e:
+                bot.on_log(f"ERROR: [buyer] {e}")
+                self.stats.update({"running": False, "state": "stopped", "stop_reason": str(e)})
+
+        self.thread = threading.Thread(target=work, daemon=True)
+        self.thread.start()
+        return True
+
+    def stop(self) -> None:
+        if self.stop_event:
+            self.stop_event.set()
+
+
+buyer = Buyer()
+
+
+class Peeker:
+    """One-shot / cached live CR read for the UI, without buying. In memory mode
+    the located address is cached (keyed by seed) so repeated reads are cheap;
+    the costly value scan runs only when the seed changes. Read-only."""
+
+    def __init__(self) -> None:
+        self.src = None
+        self.seed: int | None = None
+        self.mode: str | None = None
+
+    def read(self, mode: str, seed: int) -> int | None:
+        if buyer.running:  # don't open a second handle while the buyer runs
+            est = buyer.stats.get("credits_remaining_estimate")
+            return est if isinstance(est, int) else None
+        if mode == "ocr":
+            tmp = buyer_core.CreditSource(core.load_config(), "ocr", seed, lambda m: None)
+            return tmp.read()
+        if mode == "memory":
+            if self.src is None or self.seed != seed or self.mode != "memory":
+                if self.src:
+                    self.src.close()
+                self.src = buyer_core.CreditSource(core.load_config(), "memory", seed,
+                                                   lambda m: None, background=False)
+                self.seed, self.mode = seed, "memory"
+            return self.src.read()
+        return None
+
+
+peeker = Peeker()
+
+
 def _game_running(name: str) -> bool:
     """True if a process <name> is running (tasklist, no console window)."""
     try:
@@ -596,6 +679,8 @@ class Handler(BaseHTTPRequestHandler):
                 })
             elif path == "/api/status":
                 self._send_json({"state": bot.state, "laps": bot.laps, "running": bot.running})
+            elif path == "/api/buyer/status":
+                self._send_json(dict(buyer.stats, running=buyer.running))
             elif path == "/api/events":
                 self._sse()
             else:
@@ -621,10 +706,34 @@ class Handler(BaseHTTPRequestHandler):
                 inputs.disconnect_gamepad()
                 self._send_json({"ok": True})
             elif path == "/api/start":
+                if buyer.running:
+                    raise BadRequest("Garage Buyer is running; stop it first", status=409)
                 data = self._read_json()
                 max_laps = _int_range(data.get("max_laps", 0), "max_laps", 0, 1000000)
                 started = bot.start(max_laps)
                 self._send_json({"started": started, "running": bot.running})
+            elif path == "/api/buyer/start":
+                if bot.running:
+                    raise BadRequest("Skill Points bot is running; stop it first", status=409)
+                data = self._read_json()
+                credits = _int_range(data.get("starting_credits", 0), "starting_credits", 0, 2000000000)
+                max_buys = _int_range(data.get("max_purchases", 0), "max_purchases", 0, 100000)
+                reserve = _float_range(data.get("reserve_percent", 5.0), "reserve_percent", 0.0, 95.0)
+                # Navigation is always visual; credit tracking uses a read-only
+                # background memory read when the user gave their current CR.
+                mode = "memory" if credits >= 1 else "manual"
+                started = buyer.start(credits, max_buys, reserve, mode)
+                self._send_json({"started": started, "running": buyer.running})
+            elif path == "/api/buyer/stop":
+                buyer.stop()
+                self._send_json({"ok": True})
+            elif path == "/api/buyer/peek":
+                data = self._read_json()
+                mode = data.get("credits_mode", "memory")
+                if mode not in ("memory", "ocr"):
+                    raise BadRequest("credits_mode must be memory or ocr")
+                seed = _int_range(data.get("starting_credits", 0), "starting_credits", 0, 2000000000)
+                self._send_json({"credits": peeker.read(mode, seed)})
             elif path == "/api/stop":
                 bot.stop()
                 self._send_json({"ok": True})

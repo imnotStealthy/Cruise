@@ -50,6 +50,7 @@
 
   <nav class="mode-tabs reveal" style="--d:1" id="modeTabs">
     <button class="mode-tab active" data-mode="skill-points">SKILL POINTS</button>
+    <button class="mode-tab" data-mode="buyer">GARAGE BUYER</button>
     <button class="mode-tab" data-mode="telemetry">TELEMETRY</button>
     <button class="mode-tab" data-mode="discord">DISCORD RICH PRESENCE</button>
   </nav>
@@ -127,6 +128,7 @@
           <button id="pauseBtn" class="btn-pause" disabled>⏸ PAUSE</button>
         </div>
         <p class="failsafe">FAILSAFE — slam the mouse into the top-left corner to abort.</p>
+        <button id="showLog" class="mini show-log">SHOW LOG</button>
       </section>
 
       <section class="card telemetry">
@@ -248,6 +250,56 @@
       </div>
       <p class="hint">In FH6: Events → Search (Backspace) → type the code → Enter. (Add your own codes here as you find them.)</p>
     </div>
+  </section>
+
+  <!-- VIEW: GARAGE BUYER -->
+  <section id="view-buyer" class="view">
+    <main class="grid">
+      <section class="card control">
+        <div class="card-bar lime"></div>
+        <h2 class="card-title">GARAGE BUYER</h2>
+        <p class="hint">Open FH6 on a <b>Car Collection</b> page (SPACE Purchase visible), then start. <b>This will spend credits automatically.</b></p>
+
+        <p class="hint" id="buyerModeHint">Navigates and buys in a loop. Set <b>MAX PURCHASES</b> to bound spending. For live credit tracking: type your current CR, click <b>LOCATE CR</b> once (~2-3 min, on a stable balance), then START — tracking is then instant.</p>
+
+        <div class="ctrl-grid">
+          <div class="field">
+            <label class="field-label">STARTING CREDITS</label>
+            <input id="buyerCredits" class="inp" value="0" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label class="field-label">MAX PURCHASES <span class="opt">(0 = until stop)</span></label>
+            <input id="buyerMax" class="inp" value="0" inputmode="numeric" />
+          </div>
+          <div class="field">
+            <label class="field-label">RESERVE CREDITS %</label>
+            <input id="buyerReserve" class="inp" value="5" inputmode="decimal" />
+          </div>
+        </div>
+        <div class="run-row">
+          <button id="buyerRunBtn" class="btn-run">▶ START</button>
+          <button id="buyerReadBtn" class="btn-ghost" title="Locate your CR in memory once per FH6 session (~2-3 min). Do it on a stable balance BEFORE buying; then credit tracking is instant for every run.">LOCATE CR</button>
+        </div>
+        <p class="failsafe">FAILSAFE — slam the mouse into the top-left corner to abort.</p>
+      </section>
+
+      <section class="card telemetry">
+        <div class="card-bar lime"></div>
+        <div class="tel-head">
+          <h2 class="card-title">STATUS</h2>
+          <span class="tel-state" id="buyerState" data-on="off">STOPPED</span>
+        </div>
+        <div class="tel-readout">
+          <div class="tel-row"><span>CR CREDITS <span class="opt">(live)</span></span><b id="buyerCrLive">—</b></div>
+          <div class="tel-row"><span>CARS BOUGHT</span><b id="buyerBought">0</b></div>
+          <div class="tel-row"><span>EST. CREDITS</span><b id="buyerRemaining">—</b></div>
+          <div class="tel-row"><span>LAST PRICE</span><b id="buyerPrice">—</b></div>
+          <div class="tel-row"><span>DISCOUNT</span><b id="buyerDiscount">—</b></div>
+          <div class="tel-row"><span>STOP REASON</span><b id="buyerReason">—</b></div>
+        </div>
+        <p class="hint">Detailed [buyer] logs stream into the SKILL POINTS → CONTROLLER log panel.</p>
+      </section>
+    </main>
   </section>
 
   <!-- VIEW: TELEMETRY (Forza Data Out) -->

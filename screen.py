@@ -130,6 +130,26 @@ def grab_white(rect: tuple[int, int, int, int], min_v: int = 200, sat_tol: int =
     return (w, h, mask)
 
 
+def grab_yellow(rect: tuple[int, int, int, int], min_rg: int = 170, max_b: int = 120,
+                min_gap: int = 70) -> tuple[int, int, list[int]]:
+    """Capture and return (w, h, mask[]) where mask is 1 for YELLOW pixels
+    (high red AND green, low blue). Isolates the FH6 credit readout (bright
+    yellow ~(247,231,0)) from its dark/teal background, the way grab_white
+    isolates the white speed text."""
+    w, h, buf = grab_bgra(rect)
+    if w == 0:
+        return (0, 0, [])
+    mask = [0] * (w * h)
+    for i in range(w * h):
+        b = buf[i * 4]
+        g = buf[i * 4 + 1]
+        r = buf[i * 4 + 2]
+        lo_rg = r if r < g else g
+        if lo_rg >= min_rg and b <= max_b and (lo_rg - b) >= min_gap:
+            mask[i] = 1
+    return (w, h, mask)
+
+
 def save_png(path: str, rect: tuple[int, int, int, int]) -> None:
     """Write a capture of rect to `path` as PNG (stdlib zlib/struct only, no
     Pillow). Used by the vision debug mode to keep missed/near-miss frames."""

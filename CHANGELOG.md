@@ -3,6 +3,22 @@
 All notable changes to Cruise are documented here.
 This project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.4] - 2026-06-12
+
+### Added
+- **Garage Buyer** tab for automating Car Collection purchases with bounded
+  confirmations, purchase limits, reserve credits, and live buyer status.
+- Optional read-only credit locator/tracker for estimating available CR during
+  buyer runs.
+
+### Fixed
+- Pause-menu recovery now waits for a confirmed menu and focus state before
+  sending `Esc`, avoiding false pause inputs while racing.
+- Lap counting now uses a launch latch so repeated pre-race detections cannot
+  inflate the lap counter.
+- Buyer flow now distinguishes the normal `Buy` row from voucher options and
+  advances only after confirmed purchase states.
+
 ## [1.2.3] - 2026-06-09
 
 ### Added

@@ -170,6 +170,8 @@ def detect_state(cfg: dict, rect: tuple[int, int, int, int] | None = None, debug
             scored.append((state, passed, conf, detail))
     active = [c for c in scored if c[1]]
     winner = max(active, key=lambda c: (int(c[0].get("priority", 0)), c[2]))[0] if active else None
+    if winner is not None:
+        winner["_conf"] = next(c[2] for c in scored if c[0] is winner)
     if debug is not None:
         debug.observe(scored, winner, rect)
     return winner
@@ -340,6 +342,38 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
     menu_resume_tries = max(1, int(cfg.get("menu_resume_tries", 3)))
     paused = False
     menu_resumes = 0
+    # A guard menu (settings_menu) seen on a single poll can be a lime overlay /
+    # transition frame: without fresh telemetry, require the same guard state on
+    # N consecutive polls before sending esc.
+    guard_confirm_polls = _count(
+        cfg.get("pause_menu_confirm_polls", cfg.get("settings_confirm_polls")), 2, 1, 10
+    )
+    # In the fast preset loop_poll is 10ms, so N polls alone is no time filter:
+    # the guard state must also persist for guard_confirm_s of wall time.
+    guard_confirm_s = _duration(cfg.get("settings_confirm_s"), 0.5, 0.0)
+    guard_streak_name = None
+    guard_streak = 0
+    guard_streak_since = 0.0
+    # After menu_resume_tries failed esc taps, retry instead of idling forever
+    # (a real pause menu we opened ourselves must always be escapable).
+    menu_retry_s = _duration(cfg.get("menu_resume_retry_s"), 6.0, 1.0)
+    last_menu_tap = 0.0
+    # Pause-menu resume pacing: with FH6 focused the whole time, a confirmed
+    # pause menu must stay stable for pause_resume_delay before the first esc.
+    # Right after an alt-tab back, resume fast (pause_resume_after_focus).
+    pause_resume_delay = _duration(cfg.get("pause_menu_resume_delay_s"), 5.0, 0.0)
+    pause_resume_after_focus = _duration(cfg.get("pause_menu_resume_after_focus_s"), 0.25, 0.0)
+    pause_resume_retry = _duration(cfg.get("pause_menu_resume_retry_s"), 1.0, 0.1)
+    focus_lost_at = 0.0
+    focus_returned_at = 0.0
+    pause_wait_logged = False
+    # Lap latch: prerace_menu Enter only arms lap_pending; cycles increments once
+    # the launch is confirmed (telemetry race_on, or visually stable race after
+    # lap_confirm_s without telemetry) -> repeated prerace polls / cursor fixes
+    # can never double-count.
+    lap_pending = False
+    lap_pending_at = 0.0
+    lap_confirm_s = _duration(cfg.get("lap_confirm_s"), 5.0, 0.0)
 
     # Stuck detection / collision recovery (config-tunable, on by default).
     recovery = cfg.get("recovery_enabled", True)
@@ -648,10 +682,23 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
             # Guard 1: FH6 not in the foreground (alt-tab / other app) -> send
             # NOTHING (avoids sending W/X to another window).
             if guard and not window.is_foreground(win):
+                if focus_lost_at == 0.0:
+                    focus_lost_at = time.time()
+                    log("[focus] FH6 lost; waiting")
+                    log("[pause_menu] skipped: FH6 not foreground")
                 enter_pause("Forza Horizon 6 not focused (alt-tab)")
                 menu_resumes = 0  # fresh resume attempts each time focus returns
+                # Stale streak from before the alt-tab must not skip the
+                # confirmation polls once focus returns.
+                guard_streak_name = None
+                guard_streak = 0
+                pause_wait_logged = False
                 _sleep(loop_poll, stop)
                 continue
+            if focus_lost_at:
+                focus_returned_at = time.time()
+                focus_lost_at = 0.0
+                log("[focus] FH6 active again")
 
             rect = win[3] if win else detection_rect(cfg)
             state = detect_state(cfg, rect, vision_dbg)
@@ -666,9 +713,9 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 visual_results_delay_logged = True
             if fresh_state and race_on_state and state is not None:
                 name = state.get("name")
-                if name in ("prerace_menu", "settings_menu"):
+                if name in ("prerace_menu", "settings_menu", "menu"):
                     if ignored_racing_state != name:
-                        log(f"[{name}] ignored while telemetry race_on=true.")
+                        log(f"[guard] {name} rejected because race active (telemetry race_on=true).")
                         ignored_racing_state = name
                     state = None
                 else:
@@ -695,21 +742,92 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                     else:
                         await_confirm_until = 0.0
                         relaunch_drive_until = 0.0
+                # Track consecutive polls of the same guard state (transition/
+                # overlay frames break the streak by resolving to another state).
+                if state is not None and state.get("name") == guard_streak_name:
+                    guard_streak += 1
+                elif state is not None:
+                    guard_streak_name = state.get("name")
+                    guard_streak = 1
+                    guard_streak_since = now
+                # Harden EVERY guard state that can send a resume key (menu and
+                # settings_menu): a single lime/teal frame mid-race must never
+                # fire esc and open the real pause menu.
+                if state is not None and state.get("resume_key"):
+                    gname = state.get("name")
+                    conf = state.get("_conf", 0.0)
+                    fresh_g, race_on_g, speed_g = telem.snapshot() if telem else (False, False, 0.0)
+                    if guard_streak == 1:  # once per streak, not per 10ms poll
+                        log(
+                            f"[pause_menu] candidate count={guard_streak} {gname} conf={conf:.2f} "
+                            f"race_on={race_on_g if fresh_g else 'n/a'} speed={speed_g:.0f}"
+                        )
+                    if fresh_g and race_on_g:
+                        # Belt-and-braces: the race_on filter above already nulls
+                        # this, but never esc while telemetry says racing.
+                        log(f"[pause_menu] resume skipped: telemetry race_on=true ({gname})")
+                        state = None
+                    elif fresh_g and speed_g > stuck_speed:
+                        log(f"[guard] {gname} rejected: moving at {speed_g:.0f} km/h")
+                        state = None
+                    elif conf < 0.5:
+                        # Pixel confidence is 1-delta/(2*tol): a passing pixel
+                        # scores 0.5..1.0, so requiring 1.0 rejected every real
+                        # pause menu. 0.5 = "all checks within tolerance".
+                        log(f"[guard] {gname} rejected: low confidence {conf:.2f}")
+                        state = None
+                    elif guard_streak < guard_confirm_polls or now - guard_streak_since < guard_confirm_s:
+                        if guard_streak == 1:
+                            log(f"[guard] {gname} unconfirmed; need {guard_confirm_polls} polls over {guard_confirm_s:.2f}s.")
+                        _sleep(loop_poll, stop)
+                        continue
                 if state is None:
-                    pass
+                    guard_streak_name = None
+                    guard_streak = 0
+                    pause_wait_logged = False
                 else:
+                    if lap_pending and state.get("name") == "menu":
+                        log("[lap] pending launch cancelled (back to main menu).")
+                        lap_pending = False
                     rk = state.get("resume_key")
                     # Auto-resume: tap the resume key (esc/B) to close the menu and
                     # resume the race, retrying up to menu_resume_tries (the first tap
-                    # often misses right after an alt-tab while focus is settling).
+                    # often misses right after an alt-tab while focus is still settling).
                     # Re-detection each loop stops as soon as the menu is gone; the
                     # cap bounds damage if it's actually a stuck dashboard.
+                    if rk and menu_resumes >= menu_resume_tries and now - last_menu_tap >= menu_retry_s:
+                        # Menu still confirmed long after giving up -> it is real
+                        # (possibly opened by our own stray esc); retry escaping
+                        # instead of idling in pause forever.
+                        log(f"[pause_menu] '{state['name']}' still present after give-up; retrying resume.")
+                        menu_resumes = 0
+                    if rk and menu_resumes == 0:
+                        # Before the first esc of a streak: the confirmed menu must
+                        # stay stable for resume_wait. Short wait right after an
+                        # alt-tab back, longer when FH6 was focused the whole time.
+                        resume_wait = pause_resume_delay
+                        if focus_returned_at and now - focus_returned_at < pause_resume_delay:
+                            resume_wait = pause_resume_after_focus
+                        if now - guard_streak_since < resume_wait:
+                            if not pause_wait_logged:
+                                log(f"[pause_menu] confirmed; wait={resume_wait:.2f}s")
+                                pause_wait_logged = True
+                            status("paused")
+                            _sleep(loop_poll, stop)
+                            continue
                     if rk and menu_resumes < menu_resume_tries:
-                        log(f"Pause menu detected -> '{rk}' to resume ({menu_resumes + 1}/{menu_resume_tries}).")
+                        if menu_resumes > 0:
+                            log("[pause_menu] still visible after resume")
+                        log(
+                            f"[pause_menu] resume -> {rk} "
+                            f"(attempt {menu_resumes + 1}/{menu_resume_tries})"
+                        )
                         backend.tap(rk)
+                        last_menu_tap = time.time()
                         menu_resumes += 1
+                        pause_wait_logged = False
                         status("paused")
-                        _sleep(1.2, stop)
+                        _sleep(pause_resume_retry, stop)
                         continue
                     enter_pause(f"'{state['name']}' menu")
                     _sleep(loop_poll, stop)
@@ -719,6 +837,11 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 log("Resumed.")
                 paused = False
             menu_resumes = 0
+            # No guard state this poll -> any settings_menu streak is broken.
+            if state is None or not state.get("guard", False):
+                guard_streak_name = None
+                guard_streak = 0
+                pause_wait_logged = False
 
             if state is not None:
                 reset_stuck()  # menus/results/countdown are not "racing"
@@ -770,16 +893,20 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                         await_confirm_until = 0.0
                         relaunch_drive_until = now + _duration(cfg.get("relaunch_drive_s"), 8.0, 0.0)
                         backend.hold_accelerate()
-                # 1 lap counts only on the state marked count_lap (Start Race Event),
-                # not on Restart Event -> avoids double counting per loop.
+                # Lap latch: the count_lap state (Start Race Event) only ARMS the
+                # counter; cycles increments once the launch is confirmed in the
+                # racing branch below -> repeated prerace polls, cursor fixes or a
+                # return to the menu can never add phantom laps.
                 if state.get("count_lap", False):
-                    cycles += 1
+                    if lap_pending:
+                        log("[lap] duplicate prerace ignored (launch already pending).")
+                    else:
+                        lap_pending = True
+                        log(f"[lap] launch pending (Start Race Event sent) cycles={cycles}")
+                    lap_pending_at = time.time()
                     await_confirm_until = 0.0
                     relaunch_drive_until = 0.0
                     status(state["name"])
-                    if max_cycles and cycles >= max_cycles:
-                        log(f"Max laps reached ({cycles}). Clean stop.")
-                        break
                 # Hold the accelerator during loading + 3-2-1-GO countdown
                 # -> the car launches right at GO (instead of staying still).
                 post_wait = _duration(state.get("post_wait_s", cfg.get("post_restart_wait_s")), 8.0)
@@ -817,6 +944,22 @@ def run(cfg: dict, max_cycles: int = 0, stop=None, pause=None, on_log=None, on_s
                 backend.hold_steer()
             status("racing")
             fresh_race, race_on_now, _speed_now = telem.snapshot() if telem else (False, False, 0.0)
+            if lap_pending:
+                # Confirm the armed launch: telemetry race_on, or (no telemetry)
+                # a stable visual race (no state) lap_confirm_s after the Enter.
+                reason = None
+                if fresh_race and race_on_now:
+                    reason = "telemetry_race_on"
+                elif not fresh_race and time.time() - lap_pending_at >= lap_confirm_s:
+                    reason = "visual_stable"
+                if reason:
+                    lap_pending = False
+                    cycles += 1
+                    log(f"[lap] increment reason={reason} cycles={cycles} state=racing")
+                    status("racing")
+                    if max_cycles and cycles >= max_cycles:
+                        log(f"Max laps reached ({cycles}). Clean stop.")
+                        break
             if fresh_race and race_on_now:
                 race_seen = True
                 post_race_skip_sent = False

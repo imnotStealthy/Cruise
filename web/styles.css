@@ -578,6 +578,10 @@ body::after {
 body.log-hidden #view-controller .grid { grid-template-columns: minmax(0, 1fr); }
 body.log-hidden #view-controller .card.telemetry { display: none; }
 body.log-hidden #view-controller .card.control { max-width: 620px; width: 100%; margin: 0 auto; }
+/* SHOW LOG fallback in the Control card: only visible while the Telemetry
+   panel (and its HIDE LOG button) is hidden. */
+#view-controller .show-log { display: none; margin-top: 10px; }
+body.log-hidden #view-controller .show-log { display: inline-block; }
 
 /* Compaction (uniquement Controller) pour fit strict en 16:9 par defaut. */
 #view-controller .card { padding: 14px 16px; }

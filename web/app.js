@@ -35,7 +35,7 @@ const els = {
   elapsedTime: $("elapsedTime"),
   accelKey: $("accelKey"), steerKey: $("steerKey"), startDelay: $("startDelay"),
   pollInterval: $("pollInterval"), maxLaps: $("maxLaps"), throttleMod: $("throttleMod"), launchEase: $("launchEase"),
-  saveBtn: $("saveBtn"), runBtn: $("runBtn"), pauseBtn: $("pauseBtn"), log: $("log"), clearLog: $("clearLog"), toggleLog: $("toggleLog"),
+  saveBtn: $("saveBtn"), runBtn: $("runBtn"), pauseBtn: $("pauseBtn"), log: $("log"), clearLog: $("clearLog"), toggleLog: $("toggleLog"), showLog: $("showLog"),
   modeSeg: $("modeSeg"), presetSeg: $("presetSeg"), modeHint: $("modeHint"), accelLabel: $("accelLabel"),
   steerField: $("steerField"), conn: $("conn"),
   gamePod: $("gamePod"), gameText: $("gameText"),
@@ -49,6 +49,11 @@ const els = {
   rpSaveBtn: $("rpSaveBtn"), rpState: $("rpState"), rpCar: $("rpCar"),
   rpStateLine: $("rpStateLine"), rpHint: $("rpHint"),
   viewTelemetry: $("view-telemetry"), viewDiscord: $("view-discord"),
+  viewBuyer: $("view-buyer"), buyerRunBtn: $("buyerRunBtn"), buyerReadBtn: $("buyerReadBtn"),
+  buyerCredits: $("buyerCredits"), buyerMax: $("buyerMax"), buyerReserve: $("buyerReserve"),
+  buyerCrLive: $("buyerCrLive"),
+  buyerState: $("buyerState"), buyerBought: $("buyerBought"), buyerRemaining: $("buyerRemaining"),
+  buyerPrice: $("buyerPrice"), buyerDiscount: $("buyerDiscount"), buyerReason: $("buyerReason"),
 };
 
 let mode = "keyboard";
@@ -321,6 +326,12 @@ els.toggleLog.addEventListener("click", () => {
   logVisible = !logVisible;
   applyLogVisibility();
 });
+// SHOW LOG fallback in the Control card (the Telemetry header button is
+// hidden along with the panel, so it can't restore itself).
+if (els.showLog) els.showLog.addEventListener("click", () => {
+  logVisible = true;
+  applyLogVisibility();
+});
 els.telSaveBtn.addEventListener("click", () => saveTelemetry().catch((e) => logLine(e.message, "l-err")));
 els.rpSaveBtn.addEventListener("click", () => saveDiscord().catch((e) => logLine(e.message, "l-err")));
 // section tabs (SKILL POINTS / TELEMETRY) — TELEMETRY is a full screen that
@@ -339,6 +350,7 @@ function applySection(m) {
   });
   els.viewTelemetry.classList.toggle("active", m === "telemetry");
   els.viewDiscord.classList.toggle("active", m === "discord");
+  els.viewBuyer.classList.toggle("active", m === "buyer");
 }
 els.modeTabs.addEventListener("click", (e) => {
   const b = e.target.closest(".mode-tab");
@@ -362,6 +374,81 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
     setTimeout(() => { btn.textContent = old; btn.classList.remove("copied"); }, 1200);
   });
 });
+
+// ---- Garage Buyer ------------------------------------------------------
+let buyerRunning = false;
+let buyerConfirmed = false;
+const fmtCr = (n) => (typeof n === "number" ? n.toLocaleString("en-US") : "—");
+
+async function toggleBuyer() {
+  try {
+    if (buyerRunning) { await api("/api/buyer/stop", { method: "POST" }); return; }
+    if (!buyerConfirmed) {
+      if (!window.confirm("This will spend credits automatically. Continue?")) return;
+      buyerConfirmed = true;
+    }
+    const credits = parseInt(els.buyerCredits.value, 10) || 0;
+    const max = parseInt(els.buyerMax.value, 10) || 0;
+    const reserve = parseFloat(els.buyerReserve.value);
+    if (!Number.isFinite(reserve) || reserve < 0 || reserve > 95) throw new Error("Reserve must be 0-95 %.");
+    if (max < 1 && !window.confirm("MAX PURCHASES is 0 (unlimited). Without a credit read, it will buy until you press STOP. Continue?")) return;
+    await api("/api/buyer/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ starting_credits: credits, max_purchases: max, reserve_percent: reserve, credits_mode: "ocr" }),
+    });
+    logLine("Garage Buyer armed.", "l-state");
+  } catch (e) {
+    logLine(e.message, "l-err");
+  }
+}
+
+async function locateCr() {
+  try {
+    const seed = parseInt(els.buyerCredits.value, 10) || 0;
+    if (seed < 1) throw new Error("Enter your CURRENT CR balance first.");
+    els.buyerReadBtn.disabled = true;
+    els.buyerCrLive.textContent = "locating… (~2-3 min)";
+    logLine("Locating CR in memory (read-only, ~2-3 min)…", "l-sys");
+    const r = await api("/api/buyer/peek", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ starting_credits: seed, credits_mode: "memory" }),
+    });
+    if (r.credits != null) {
+      els.buyerCrLive.textContent = fmtCr(r.credits);
+      logLine(`CR located: ${fmtCr(r.credits)}. Tracking is now instant for START.`, "l-state");
+    } else {
+      els.buyerCrLive.textContent = "not found";
+      logLine("CR not found — make sure the balance you typed matches exactly, then retry.", "l-err");
+    }
+  } catch (e) {
+    els.buyerCrLive.textContent = "—";
+    logLine(e.message, "l-err");
+  } finally {
+    els.buyerReadBtn.disabled = false;
+  }
+}
+els.buyerReadBtn.addEventListener("click", locateCr);
+
+async function pollBuyer() {
+  try {
+    const s = await api("/api/buyer/status");
+    buyerRunning = !!s.running;
+    if (buyerRunning && typeof s.credits_remaining_estimate === "number") els.buyerCrLive.textContent = fmtCr(s.credits_remaining_estimate);
+    els.buyerRunBtn.textContent = buyerRunning ? "■ STOP" : "▶ START";
+    els.buyerRunBtn.classList.toggle("stop", buyerRunning);
+    els.buyerState.dataset.on = buyerRunning ? "on" : "off";
+    els.buyerState.textContent = (s.state || "stopped").toUpperCase();
+    els.buyerBought.textContent = s.cars_bought ?? 0;
+    els.buyerRemaining.textContent = fmtCr(s.credits_remaining_estimate);
+    els.buyerPrice.textContent = fmtCr(s.last_price_detected);
+    els.buyerDiscount.textContent = s.discount_percent_detected != null ? `${s.discount_percent_detected}%` : "—";
+    els.buyerReason.textContent = s.stop_reason || "—";
+    [els.buyerCredits, els.buyerMax, els.buyerReserve, els.buyerReadBtn].forEach((e) => (e.disabled = buyerRunning));
+  } catch { /* ignore */ }
+}
+els.buyerRunBtn.addEventListener("click", toggleBuyer);
+pollBuyer();
+setInterval(pollBuyer, 700);
 
 // ---- FH6 process detection -------------------------------------------
 async function pollGame() {
